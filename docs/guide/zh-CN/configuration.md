@@ -46,3 +46,5 @@ hitch:
 ## 进阶路径
 
 [Context offloading](../../dsh-meta-context-offloading-spec.zh-CN.md)适用于 native DSH Meta adapter，必须在新建实验前封存。[算法设置](example-algorithm.md)依赖对应搜索实现；[训练配置](training.md)使用独立 controller 合同。当前 checkout 的[源码 schema](../../../src/config.ts)是字段定义依据。
+
+搜索评测缺口的自动补齐由 `search.evaluationStages.repair` 控制，默认额外 3 次并等待 15/60/180 秒；省略字段兼容旧配置。修复与首次执行共享评测、repair 和时间预算。详见[搜索评测恢复说明](../../search-evaluation-recovery.zh-CN.md)。

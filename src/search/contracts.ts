@@ -214,6 +214,13 @@ export function validateSettings(settings: SearchSettings, universe: TaskUnivers
   if (s.scopeSampling.updateEveryRounds !== undefined) integer(s.scopeSampling.updateEveryRounds, 'scope update period', 1)
   if (s.scopeSampling.maxHistoricalSpecialists !== undefined) integer(s.scopeSampling.maxHistoricalSpecialists, 'scope historical specialist limit')
   invariant(s.evaluationStages.reuseValidCells === true && s.evaluationStages.globalSeed.maxCandidates === 1, 'invalid staged evaluation policy')
+  const repair = s.evaluationStages.repair
+  if (repair?.maxAttempts !== undefined) integer(repair.maxAttempts, 'repair.maxAttempts')
+  if (repair?.jitterMs !== undefined) integer(repair.jitterMs, 'repair.jitterMs')
+  if (repair?.backoffMs !== undefined) {
+    invariant(repair.backoffMs.length > 0, 'repair.backoffMs must not be empty')
+    for (const delay of repair.backoffMs) integer(delay, 'repair.backoffMs')
+  }
   integer(s.evaluationStages.bridge.maxCandidates, 'bridge.maxCandidates')
   invariant(s.evaluationStages.bridge.groupAllocation === 'weighted-round-robin' && s.evaluationStages.bridge.taskSelection === 'nominated-scopes-union-then-stratified', 'unsupported bridge policy')
   invariant(s.globalTaskWeights === 'uniform', 'unsupported global task weighting')

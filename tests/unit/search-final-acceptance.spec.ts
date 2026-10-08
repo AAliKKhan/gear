@@ -81,27 +81,41 @@ describe('remaining publication and immutable-history acceptance', () => {
   })
 
   it.each(['local', 'bridge', 'global-seed'] as const)('[R10] appends consumed %s evidence for the next archive without changing frozen decisions or nominee', async stage => {
-    const f = await setup(), evaluate = f.provider.evaluate
+    const f = await setup(true), evaluate = f.provider.evaluate
+    f.config.search.process.mode = 'off'; f.config.promotion.process.mode = 'off'
     if (stage === 'local') f.config.search.evaluationStages.bridge.maxCandidates = 0
     let partialId: string | undefined
     f.provider.evaluate = async input => {
       const cells = await evaluate(input)
-      if (input.plan.stage === stage && input.snapshot.candidateId !== 'anchor' && !partialId) { partialId = input.snapshot.candidateId; return cells.slice(1) }
+      if (input.plan.stage === stage && input.snapshot.candidateId !== 'anchor' && !partialId) {
+        partialId = input.snapshot.candidateId
+        return cells.map(cell => revise(cell, { process: { status: 'missing', contractDigest: cell.identity.processContractDigest!, reason: 'unselected channel projection missing' } }))
+      }
       return cells
     }
     const result = await f.run(), originalArchive = (await f.journal.archive())!
     const s = originalArchive.snapshots.find(s => s.candidateId === partialId)!
     const original = originalArchive.results.find(r => r.snapshotDigest === s.digest && originalArchive.plans.some(p => p.digest === r.stagePlanDigest && p.stage === stage))!, plan = originalArchive.plans.find(p => p.digest === original.stagePlanDigest)!
     const decisions = result.research.stageDecisions
-    if (stage === 'global-seed') expect(result.promotion?.outcome).toBe('insufficient-evidence')
-    else expect(decisions.find(d => d.candidateId === partialId && d.stagePlanDigest === plan.digest)?.outcome).toBe('insufficient-evidence')
+    expect(result.research.candidates.every(c => c.profile.outcomeComplete)).toBe(true)
+    if (stage === 'local') expect(decisions.find(d => d.candidateId === partialId && d.stagePlanDigest === plan.digest)?.outcome).toBe('retained-local')
+    const executionCount = f.executions.length
+    for (const cell of original.cells.filter(c => c.process?.status !== 'available')) {
+      const projected = revise(cell, { process: { status: 'available', rawValue: 1, contractDigest: cell.identity.processContractDigest!, evidenceRef: cell.evidenceRef } })
+      await f.journal.put(projected)
+      await f.journal.write(`cells/${cellKey(cell.identity).slice(7)}`, { ref: projected.digest })
+    }
     const completion = await completeArchivedEvidence({ id: 'historical', store: f.journal, provider: f.provider, universe: f.seed, plan, snapshot: s, original, settings: f.config, signal: new AbortController().signal })
     expect(completion.completedResultDigest).not.toBe(original.digest)
+    const completed = await f.journal.object<StageResult>(completion.completedResultDigest)
+    expect(completed.cells.every(c => c.process?.status === 'available')).toBe(true)
+    expect(completed.cells.map(c => c.outcome)).toEqual(original.cells.map(c => c.outcome))
+    expect(f.executions).toHaveLength(executionCount)
     expect(await f.journal.archive()).toEqual(originalArchive)
     expect(await f.run()).toEqual(result)
     expect(result.research.stageDecisions).toEqual(decisions)
     if (stage === 'global-seed') expect(result.nomineeId).toBe(partialId)
-    else expect(result.nomineeId).toBeUndefined()
+    if (stage === 'local') expect(result.nomineeId).toBeUndefined()
     await f.engine().run({ ...f.request, roundId: 'r2', roundIndex: 1 }, new AbortController().signal)
     expect((await f.journal.archive())!.results.some(r => r.digest === completion.completedResultDigest)).toBe(true)
     expect(await f.journal.object(originalArchive.digest)).toEqual(originalArchive)

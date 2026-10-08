@@ -43,8 +43,8 @@ export async function verifyCells(provider: SearchProvider, cells: readonly Cell
 export function assertConsistentCells(a: EvidenceCell, b: EvidenceCell): void {
   if (!validOutcome(a) || !validOutcome(b)) return
   invariant(digestJson(a.identity) === digestJson(b.identity) && a.evidenceRef === b.evidenceRef && a.completedAt === b.completedAt
-    && digestJson(a.outcome) === digestJson(b.outcome) && a.outcomeCertified === b.outcomeCertified && a.envelope === b.envelope
-    && digestJson(a.assertions ?? null) === digestJson(b.assertions ?? null), 'evidence cannot rerun or replace a valid outcome')
+    && digestJson(a.outcome) === digestJson(b.outcome) && a.outcomeCertified === b.outcomeCertified && a.envelope === b.envelope, 'evidence cannot rerun or replace a valid outcome')
+  for (const assertion of a.assertions ?? []) invariant(digestJson(b.assertions?.find(next => next.id === assertion.id)) === digestJson(assertion), 'evidence cannot replace an existing assertion')
   if (a.rawMetrics) {
     invariant(b.rawMetrics, 'evidence cannot discard raw metrics')
     const before = a.rawMetrics, after = b.rawMetrics
@@ -150,7 +150,6 @@ export async function reusableCells(store: SearchJournal, provider: SearchProvid
     const old = current.find(c => cellKey(c.identity) === cellKey(identity))
     // Complete legacy channels do not imply complete raw metrics. Older views
     // may omit a declared metric (or its entire record), so inspect the cache.
-    if (old && validOutcome(old) && (!identity.processContractDigest || old.process?.status === 'available') && !identity.rawMetricContractsDigest) continue
     const pointer = await store.read<{ ref: string }>(`cells/${cellKey(identity).slice(7)}`)
     if (!pointer) continue
     const cell = await store.object<EvidenceCell>(pointer.ref)
@@ -158,9 +157,10 @@ export async function reusableCells(store: SearchJournal, provider: SearchProvid
     assertCell(cell, identity); checked.push({ cell, identity })
     if (old && validOutcome(old)) {
       const processCompleted = identity.processContractDigest && old.process?.status !== 'available' && cell.process?.status === 'available'
+      const assertionCompleted = cell.assertions?.some(assertion => !old.assertions?.some(saved => saved.id === assertion.id))
       const rawMetricCompleted = Object.entries(cell.rawMetrics?.metrics ?? {}).some(([id, metric]) =>
         metric.status === 'available' && old.rawMetrics?.metrics[id]?.status !== 'available')
-      if (!processCompleted && !rawMetricCompleted) continue
+      if (!processCompleted && !rawMetricCompleted && !assertionCompleted) continue
       assertConsistentCells(old, cell)
     }
     reusable.push(cell)
@@ -174,6 +174,7 @@ export function completeEvidence(original: StageResult, replacements: EvidenceCe
   const cells = new Map(original.cells.map(c => [cellKey(c.identity), c]))
   for (const replacement of replacements) {
     verifyDigest(replacement)
+    invariant(new Set(replacement.assertions?.map(a => a.id) ?? []).size === (replacement.assertions?.length ?? 0), 'duplicate assertion identity')
     const key = cellKey(replacement.identity), old = cells.get(key)
     if (old && validOutcome(old)) {
       invariant(validOutcome(replacement), 'completion cannot rerun or replace a valid outcome')

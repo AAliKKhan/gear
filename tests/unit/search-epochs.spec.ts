@@ -5,13 +5,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { digestJson } from '../../src/state/digest.js'
 import { selectParents } from '../../src/search/archive.js'
 import { FailureClusterSearch } from '../../src/search/engine.js'
-import { SearchOperationPending, SearchExecutionFailure } from '../../src/search/recovery.js'
+import { SearchOperationPending, SearchExecutionFailure, SearchEvidencePending } from '../../src/search/recovery.js'
 import { SearchStore } from '../../src/search/store.js'
 import { createScope, sharedTasks } from '../../src/search/scopes.js'
 import { samplingEvidence } from '../../src/search/scope-sampling.js'
 import { validOutcome, cellKey } from '../../src/search/evidence.js'
 import { resolveSizing, sorted, validateSettings } from '../../src/search/contracts.js'
 import { fixtures, settings } from '../helpers/search-fixture.js'
+import type { PendingSearchEvidence } from '../../src/search/types.js'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -123,10 +124,10 @@ describe('scope epoch preparation at the planning boundary', () => {
     expect(await f.run('r1', 1)).toEqual(result)
   })
 
-  for (const kind of ['missing', 'terminal-failure'] as const) it(`[A12,R09] keeps old eligibility when the proposed baseline is ${kind}`, async () => {
+  for (const kind of ['missing', 'terminal-failure'] as const) it(`[A12,R09] keeps epoch preparation pending and old eligibility when the proposed baseline is ${kind}`, async () => {
     const f = await setup()
     await f.run('r0', 0)
-    const previous = (await f.store.archive())!, evaluate = f.provider.evaluate
+    const previous = (await f.store.archive())!, evaluate = f.provider.evaluate, generated = [...f.generated]
     f.provider.evaluate = async input => {
       if (input.plan.stage === 'baseline-probe' && input.snapshot.candidateId !== 'anchor') {
         if (kind === 'terminal-failure') throw new SearchExecutionFailure('scope-worker-exited', 'scope worker exited', 'provider:scope-worker-1')
@@ -134,13 +135,17 @@ describe('scope epoch preparation at the planning boundary', () => {
       }
       return evaluate(input)
     }
-    const result = await f.run('r1', 1), next = (await f.store.archive())!
-    const rejected = result.research.scopePreparation.decisions.filter(d => d.status === 'baseline-ineligible')
-    expect(rejected.length).toBeGreaterThan(0)
-    for (const decision of rejected) {
-      expect(next.scopeProbabilities[decision.previousScopeDigest]).toBeGreaterThan(0)
-      expect(next.scopeProbabilities[decision.proposedScopeDigest!]).toBeUndefined()
+    await expect(f.run('r1', 1)).rejects.toBeInstanceOf(SearchEvidencePending)
+    const pending = await f.store.read<PendingSearchEvidence>('rounds/r1/pending-evidence')
+    expect(pending?.state).toBe('infrastructure-incomplete')
+    expect(pending?.resultRefs.length).toBeGreaterThan(0)
+    expect(pending?.participants?.[0]?.missingSlots.length).toBeGreaterThan(0)
+    expect(pending?.participants?.[0]?.attempts.length).toBeLessThanOrEqual(3)
+    for (const decision of ['scope-preparation', 'planning', 'research', 'commit', 'terminal']) {
+      expect(await f.store.read(`rounds/r1/${decision}`)).toBeUndefined()
     }
+    expect(await f.store.archive()).toEqual(previous)
+    expect(f.generated).toEqual(generated)
     expect(await f.store.object<typeof previous>(previous.digest)).toEqual(previous)
   })
 

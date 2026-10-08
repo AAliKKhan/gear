@@ -164,7 +164,7 @@ regression:
 
 调用 `control.search-resume`，参数为 `{ "evolutionId": "...", "roundId": "..." }`，可恢复同一轮次；服务重启也会继续尚未结算的搜索轮次。截止前仍使用原幂等键，截止后只读查询已有操作；已完成的结果和 commit intent 可以继续对账，禁止新运行。没有能够证明终态的查询结果时保持 pending，不另选 finalist 或开启新一轮。补评操作本身需要用原 `repairId` / completion ID 再次调用；原操作未解决时拒绝换 ID 创建第二次执行。
 
-缺失 held-out 时，状态返回 `searchPendingEvidence`。可通过 Skill 控制 API 调用：
+任一搜索评测缺失时，Gear 先在冻结决策前执行有界自动补齐；默认额外 3 次、等待 15/60/180 秒并附加最多 1 秒稳定 jitter，可通过 `search.evaluationStages.repair` 配置。耗尽或永久投影缺口时保留 `searchPendingEvidence`，本轮不终结为拒绝。原始引用、缺少 slots、重试及预算边界见[搜索评测恢复说明](search-evaluation-recovery.zh-CN.md)。可通过 Skill 控制 API 调用：
 
 ```json
 {

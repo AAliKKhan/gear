@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { digestJson } from '../../src/state/digest.js'
 import { buildArchive, selectParents } from '../../src/search/archive.js'
 import { cellIdentity, cellKey, completeEvidence, profile } from '../../src/search/evidence.js'
-import { FailureClusterSearch } from '../../src/search/engine.js'
+import { FailureClusterSearch, SearchEvidencePending } from '../../src/search/engine.js'
 import { SearchStore } from '../../src/search/store.js'
 import { resolveSizing, sorted, validateSettings } from '../../src/search/contracts.js'
 import { bridgeSelection } from '../../src/search/scopes.js'
@@ -164,18 +164,19 @@ describe('expansion acceptance: common plans and exact remaining budget', () => 
       return evaluate(input)
     }
     const journal = new SearchStore(root), engine = new FailureClusterSearch(journal, f.provider, f.diagnosis, f.hooks)
-    const result = await engine.run({ evolutionId: 'tight-budget', roundId: 'r', roundIndex: 0, maxCandidates: 4,
-      anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: limits }, new AbortController().signal)
+    await expect(engine.run({ evolutionId: 'tight-budget', roundId: 'r', roundIndex: 0, maxCandidates: 4,
+      anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: limits }, new AbortController().signal)).rejects.toBeInstanceOf(SearchEvidencePending)
     const bridge = f.executions.filter(e => e.stage === 'bridge' && e.participant !== 'anchor')
     expect(bridge.map(e => e.count)).toEqual([25, 25])
     expect(bridgePlans).toHaveLength(2); expect(bridgePlans[0]).toHaveLength(40); expect(bridgePlans[1]).toEqual(bridgePlans[0])
     expect(f.executions.reduce((sum, e) => sum + e.count, 0)).toBe(210)
-    expect(result.reasonCodes).toContain('budget-exhausted:round.cells')
-    expect(result.championChanged).toBe(false); expect(f.promotions).toEqual([])
-    expect(result.nomineeId).toBeDefined()
+    expect(await journal.read('rounds/r/pending-evidence')).toMatchObject({ reasonCodes: ['budget-exhausted:round.cells'] })
+    expect(await journal.read('rounds/r/commit')).toBeUndefined(); expect(f.promotions).toEqual([])
+    expect(await journal.read('rounds/r/nomination')).toBeDefined()
     expect(f.executions.every(e => e.stage !== 'held-out')).toBe(true)
-    expect((await journal.archive())!.snapshots).toHaveLength(5)
-    expect(result.research.bridge.exclusions.filter(e => e.reason === 'group-quota')).toHaveLength(2)
+    expect((await journal.archive())!.snapshots).toHaveLength(1)
+    const expansion = await journal.object<import('../../src/search/types.js').BridgeSelectionDecision & { digest: string }>((await journal.read<{ ref: string }>('rounds/r/expansion'))!.ref)
+    expect(expansion.exclusions.filter(e => e.reason === 'group-quota')).toHaveLength(2)
   })
 
   it('[E03,E11] reduces group quota to fit the full scope union and retains every required guard', async () => {

@@ -1724,7 +1724,7 @@ export class RefineService {
           })),
         }])
     const pendingSearchEvidence = round.searchMode && !round.searchOutcome
-      ? await new SearchStore(join(this.registry.stateStore(evolutionId).root, 'search')).read<{ planDigest: string; resultRefs: string[] }>(`rounds/${round.roundId}/pending-evidence`)
+      ? await new SearchStore(join(this.registry.stateStore(evolutionId).root, 'search')).read<import('../search/types.js').PendingSearchEvidence | null>(`rounds/${round.roundId}/pending-evidence`)
       : undefined
     const pendingSearchOperation = round.searchMode && !round.searchOutcome
       ? await new SearchStore(join(this.registry.stateStore(evolutionId).root, 'search')).read<import('../search/types.js').PendingSearchOperation | null>(`rounds/${round.roundId}/pending-operation`)

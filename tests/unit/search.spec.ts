@@ -212,7 +212,8 @@ it('completes only the invalid historical slot without changing valid zero outco
 })
 
 it('repairs only held-out invalid cells after research freeze, retaining finalist and seed archive', async () => {
-  const f = fixtures(20), journal = new SearchStore(await root()), originalEvaluate = f.provider.evaluate.bind(f.provider)
+  const f = fixtures(20), journal = new SearchStore(await root()), originalEvaluate = f.provider.evaluate.bind(f.provider), config = settings()
+  config.search.evaluationStages.repair = { maxAttempts: 0 }
   let invalidate = true
   f.provider.evaluate = async input => {
     const cells = await originalEvaluate(input)
@@ -224,7 +225,7 @@ it('repairs only held-out invalid cells after research freeze, retaining finalis
     return cells
   }
   const engine = new FailureClusterSearch(journal, f.provider, f.diagnosis, f.hooks)
-  const request = { evolutionId: 'held-repair', roundId: 'r', roundIndex: 0, maxCandidates: 1, anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: settings() }
+  const request = { evolutionId: 'held-repair', roundId: 'r', roundIndex: 0, maxCandidates: 1, anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: config }
   await expect(engine.run(request, new AbortController().signal)).rejects.toThrow('needs evidence repair')
   const research = await journal.read<{ ref: string }>('rounds/r/research')
   const pending = await journal.read<{ resultRefs: string[] }>('rounds/r/pending-evidence')

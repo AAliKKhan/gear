@@ -3,8 +3,12 @@ import { resolveMetric, resolveObjective } from '../../src/objective/contracts.j
 import { extractRawMetrics } from '../../src/objective/scoring.js'
 import { completeArchivedEvidence } from '../../src/search/completion.js'
 import { FailureClusterSearch, SearchEvidencePending } from '../../src/search/engine.js'
+import { SearchExecutionRuntime } from '../../src/search/runtime.js'
+import { ComponentRegistry } from '../../src/evolution/components.js'
+import { integrity, seal } from '../../src/search/contracts.js'
+import { stagePlan } from '../../src/search/scopes.js'
 import { assertConsistentCells, cellKey, profile } from '../../src/search/evidence.js'
-import { MemorySearchStore, evaluatedFixture, fixtures, revise, scopeFixture, settings } from '../../src/search/testing.js'
+import { MemorySearchStore, evaluatedFixture, fixtures, revise, scopeFixture, settings, snapshot } from '../../src/search/testing.js'
 import type { EvidenceCell, StageEvaluationPlan, StageResult, TaskUniverse } from '../../src/search/types.js'
 import { digestJson } from '../../src/state/digest.js'
 
@@ -123,4 +127,48 @@ describe('raw metric evidence recovery', () => {
     expect((await run()).championChanged).toBe(true)
     expect(f.executions).toHaveLength(count)
   })
+  it('completes missing raw metrics from original artifacts without another rollout', async () => {
+    const f = setup(), evaluate = f.provider.evaluate
+    let projected = 0
+    f.provider.evaluate = async input => (await evaluate(input)).map(cell =>
+      input.plan.stage === 'held-out' && input.snapshot.candidateId !== 'anchor' ? measured(cell) : cell)
+    f.provider.completeEvidence = async cell => { projected++; return measured(cell, 1) }
+    const engine = new FailureClusterSearch(f.store, f.provider, f.diagnosis, f.hooks)
+    const outcome = await engine.run({ evolutionId: 'raw-projection', roundId: 'r', roundIndex: 0, maxCandidates: 1,
+      anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: f.config }, new AbortController().signal)
+    expect(outcome.championChanged).toBe(true)
+    expect(projected).toBe(f.heldOut.tasks.length)
+    expect(f.executions.filter(e => e.stage === 'held-out' && e.participant !== 'anchor')).toHaveLength(1)
+  })
+
+  it('repairs an objective initial reference after another local consumer froze, then protects the reference consumption', async () => {
+    const f = setup(), currentAnchor = snapshot('later-champion'), evaluate = f.provider.evaluate
+    const constrained = resolveObjective({ terms: [{ metric: 'quality', weight: 1 }],
+      constraints: [{ metric: 'quality', rule: 'no_regression', reference: 'initial_baseline' }] }, contracts)
+    const seed = revise(f.seed, { objective: constrained }), heldOut = revise(f.heldOut, { objective: constrained })
+    f.provider.describe = async partition => partition === 'seed' ? seed : heldOut
+    const initial = await f.store.freezeEvolution('objective-initial-harness', () => f.anchor)
+    expect(initial.digest).not.toBe(currentAnchor.digest)
+    const runtime = new SearchExecutionRuntime(f.store, f.provider, f.diagnosis, f.hooks, new ComponentRegistry())
+    const request = { evolutionId: 'initial-reference', roundId: 'r', roundIndex: 1, maxCandidates: 1,
+      anchor: currentAnchor, championRevisionDigest: digestJson('later-revision'), settings: f.config }
+    const current = await runtime.validate(request), startedAt = Date.now()
+    const admission = await f.store.freeze('r', 'admission', () => seal({ ...request, ...current,
+      startedAt, providerIntegrity: f.provider.integrity, algorithmIntegrity: integrity }))
+    await f.store.freeze('r', 'local', () => seal({ entries: [], reasons: [] }))
+    const plan = stagePlan({ stage: 'local', partition: 'seed', universeDigest: seed.digest, taskSetSizeResolutionDigest: digestJson('size'),
+      scopeDigest: digestJson('initial-scope'), taskIds: ['task-0', 'task-1'], participantIds: [initial.candidateId],
+      prerequisiteDecisionDigests: [], selectionRuleDigest: digestJson('objective-initial-reference-v1') })
+    f.provider.evaluate = async input => (await evaluate(input)).slice(1)
+    const signal = new AbortController().signal
+    const original = await runtime.evaluate(admission, startedAt, seed, plan, initial, signal, signal)
+    f.provider.evaluate = evaluate
+    const repaired = await runtime.ensureEvaluationComplete(admission, seed, plan, initial, original, signal, signal)
+    expect(repaired.cells).toHaveLength(2)
+    expect(f.executions.map(e => e.count)).toEqual([2, 1])
+    expect(profile(seed, plan, initial, repaired, 'auto').objectiveComplete).toBe(true)
+    await runtime.consume('r', repaired, 'objective-reference', digestJson('frozen-initial-baseline'))
+    await expect(runtime.repairEvaluation('r', 'late-reference', original.digest, signal)).rejects.toThrow('stage already consumed')
+  })
+
 })

@@ -15,6 +15,7 @@ const roots: string[] = []
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function setup(process = false) {
   const f = fixtures(20, process), config = settings()
+  config.search.evaluationStages.repair = { maxAttempts: 0, backoffMs: [0], jitterMs: 0 }
   const root = await mkdtemp(join(tmpdir(), 'gear-recovery-')); roots.push(root)
   const store = new SearchStore(root)
   const request = { evolutionId: 'recovery', roundId: 'r', roundIndex: 0, maxCandidates: 4, anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: config }
@@ -47,7 +48,7 @@ describe('external execution recovery and budget settlement', () => {
       const f = await setup(), original = f.provider.evaluate
       const keys: string[] = []
       let ready = false
-      f.provider.inspectEvaluation = async () => ({ status: 'running', handle: 'external-run-17' })
+      f.provider.inspectEvaluation = async () => ready ? { status: 'not-started' } : { status: 'running', handle: 'external-run-17' }
       f.provider.evaluate = async input => {
         if (input.snapshot.candidateId !== 'anchor' && input.plan.stage === stage && !keys.length || keys.includes(input.idempotencyKey)) {
           keys.push(input.idempotencyKey)
@@ -82,12 +83,15 @@ describe('external execution recovery and budget settlement', () => {
         }
         return original(input)
       }
-      const result = await f.run(), archive = (await f.store.archive())!
+      await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
       expect(failed).toBe(true)
-      expect(result.championChanged).toBe(false)
-      expect(result.reasonCodes).toContain('execution-failure:worker-exited')
-      expect(archive.snapshots.filter(s => s.parentIds.length)).toHaveLength(f.generated.length)
-      if (stage !== 'local') expect(result.research.candidates.every(c => c.profile.outcomeComplete)).toBe(true)
+      const pending = (await f.store.read<import('../../src/search/types.js').PendingSearchEvidence>('rounds/r/pending-evidence'))!
+      const failedResult = await f.store.object<StageResult>(pending.participants![0]!.currentRef)
+      expect(failedResult.failure).toMatchObject({ kind: 'execution-failure', code: 'worker-exited' })
+      expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+      expect(await f.store.read('rounds/r/commit')).toBeUndefined()
+      expect(f.generated).toHaveLength(4)
+      if (stage !== 'local') expect(await f.store.read('rounds/r/local')).toBeDefined()
       expect(f.executions.filter(e => e.stage === 'global-seed' && e.participant !== 'anchor').length).toBeLessThanOrEqual(1)
       expect(f.promotions).toEqual([])
     })
@@ -100,13 +104,12 @@ describe('external execution recovery and budget settlement', () => {
       await progress?.(phase)
       if (phase === 'bridge') vi.spyOn(Date, 'now').mockReturnValue(start + f.config.budgets.round.timeoutMs + 1000)
     }
-    const result = await f.run()
-    expect(result.championChanged).toBe(false)
-    expect(result.research.candidates).toHaveLength(4)
-    expect(result.research.candidates.every(c => c.profile.outcomeComplete)).toBe(true)
-    expect(result.reasonCodes).toContain('budget-exhausted:time')
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+    expect(await f.store.read('rounds/r/local')).toBeDefined()
+    expect(await f.store.read('rounds/r/pending-evidence')).toMatchObject({ reasonCodes: ['budget-exhausted:time'] })
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
     expect(f.executions.some(e => e.stage === 'bridge' || e.stage === 'global-seed' || e.stage === 'held-out')).toBe(false)
-    expect(await f.run()).toEqual(result)
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
   })
 
   for (const resolution of ['complete', 'not-started'] as const) it(`[R04,D05] only inspects an unresolved held-out operation after expiration (${resolution})`, async () => {
@@ -132,9 +135,12 @@ describe('external execution recovery and budget settlement', () => {
     await expect(f.run()).rejects.toBeInstanceOf(SearchOperationPending)
     expect(calls).toBe(before)
     ready = true
-    const result = await f.run()
+    if (resolution === 'complete') expect((await f.run()).championChanged).toBe(true)
+    else {
+      await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+      expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+    }
     expect(calls).toBe(before)
-    expect(result.championChanged).toBe(resolution === 'complete')
     expect(await f.store.read('rounds/r/research')).toEqual(research)
     expect(await f.store.read('rounds/r/pending-operation')).toBeNull()
   })
@@ -173,11 +179,13 @@ describe('external execution recovery and budget settlement', () => {
     vi.spyOn(Date, 'now').mockReturnValue(start + f.config.budgets.round.timeoutMs + 1000)
     await expect(f.run()).rejects.toBeInstanceOf(SearchOperationPending)
     ready = true
-    const result = await f.run()
+    if (kind === 'generation') {
+      await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+      expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+    } else expect((await f.run()).championChanged).toBe(false)
     expect(calls).toBe(1)
-    expect(result.championChanged).toBe(false)
     expect(f.executions.filter(e => e.participant !== 'anchor')).toEqual([])
-    expect((await f.store.archive())!.snapshots.filter(s => s.parentIds.length)).toHaveLength(kind === 'generation' ? 1 : 0)
+    expect((await f.store.archive())!.snapshots.filter(s => s.parentIds.length)).toHaveLength(0)
     expect(await f.store.read('rounds/r/pending-operation')).toBeNull()
   })
 
@@ -198,7 +206,7 @@ describe('external execution recovery and budget settlement', () => {
     expect(await f.store.read('rounds/r/pending-operation')).toMatchObject({ kind: 'generation', state: 'running' })
   })
 
-  it('settles a held-out repair started after expiry without blocking round completion', async () => {
+  it('keeps an expired held-out repair pending without rejecting or releasing the round', async () => {
     const f = await setup(), original = f.provider.evaluate, start = Date.now()
     f.provider.evaluate = async input => {
       const cells = await original(input)
@@ -214,12 +222,12 @@ describe('external execution recovery and budget settlement', () => {
     expect(repaired.failure).toMatchObject({ kind: 'budget-exhausted', code: 'time' })
     expect(repaired.cells).toEqual(before.cells)
     expect(await f.store.read('budget')).toEqual(ledger)
-    const result = await f.run()
-    expect(result.reasonCodes).toContain('budget-exhausted:time')
-    expect(result.championChanged).toBe(false)
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+    expect(await f.store.read('rounds/r/pending-evidence')).toMatchObject({ state: 'infrastructure-incomplete', reasonCodes: ['budget-exhausted:time'] })
     expect(f.executions).toHaveLength(calls)
-    expect(await f.store.read('active-round')).toEqual({ roundId: null })
-    expect(await f.run()).toEqual(result)
+    expect(await f.store.read('active-round')).toEqual({ roundId: 'r' })
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
   })
 
   it('[R06,R08] recovers a held-out repair after deadline using only its original cell request', async () => {

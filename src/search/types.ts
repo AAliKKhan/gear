@@ -93,6 +93,51 @@ export interface MultisignalPromotionConfig {
   protectedTasks: TaskGuard[]
   protectedAssertions: AssertionGuard[]
 }
+export interface EvaluationRepairConfig {
+  /** Extra repair attempts for one frozen stage participant; the original execution is excluded. */
+  maxAttempts?: number
+  /** Delays before successive attempts; the final entry also applies to later attempts. */
+  backoffMs?: number[]
+  /** Stable, bounded additive jitter, persisted with each attempt. */
+  jitterMs?: number
+}
+export interface EvaluationRepairAttempt {
+  id: string
+  number: number
+  scheduledAt: number
+  notBefore: number
+  state: 'scheduled' | 'running' | 'complete'
+  resultRef?: string
+}
+export interface AutomaticEvaluationRepair {
+  originalRef: string
+  policy: Required<EvaluationRepairConfig>
+  attempts: EvaluationRepairAttempt[]
+}
+export interface MissingEvaluationSlot {
+  identity: CellIdentity
+  channel: 'outcome' | 'process' | 'raw-metric' | 'assertion'
+  metric?: string
+  assertionId?: string
+  status: 'missing' | 'invalid' | 'unsupported'
+  repair: 'execution' | 'projection' | 'unsupported'
+  reason: string
+}
+/** Private operator evidence; never pass held-out details to Meta or seed status. */
+export interface PendingSearchEvidence {
+  planDigest: string
+  /** Original frozen StageResult refs, never the digest of a later repair. */
+  resultRefs: string[]
+  state?: 'repairing' | 'infrastructure-incomplete'
+  reasonCodes?: string[]
+  participants?: Array<{
+    candidateId: string
+    originalRef: string
+    currentRef: string
+    missingSlots: MissingEvaluationSlot[]
+    attempts: EvaluationRepairAttempt[]
+  }>
+}
 export interface SearchConfig {
   mode: 'failure-cluster-gepa-v1'
   seed: number
@@ -111,6 +156,8 @@ export interface SearchConfig {
     bridge: { maxCandidates: number; groupAllocation: 'weighted-round-robin'; taskSelection: 'nominated-scopes-union-then-stratified' }
     globalSeed: { maxCandidates: 1 }
     reuseValidCells: true
+    /** Omit to use bounded Gear-level repair defaults without changing Hitch's retry policy. */
+    repair?: EvaluationRepairConfig
   }
   process: { mode: ProcessMode; parentBudgetFraction: number }
   globalTaskWeights: 'uniform'
@@ -267,7 +314,7 @@ export interface EvidenceConsumption {
   snapshotDigest: string
   resultDigest: string
   consumerDigest: string
-  consumer: 'bootstrap-archive' | 'diagnosis' | 'workplans' | 'local-decision' | 'nomination' | 'research-archive' | 'scope-preparation'
+  consumer: 'bootstrap-archive' | 'diagnosis' | 'workplans' | 'local-decision' | 'nomination' | 'research-archive' | 'scope-preparation' | 'objective-reference'
   digest: string
 }
 export interface Coverage {
@@ -493,6 +540,11 @@ export interface SearchProvider {
   completeProcess?(cell: EvidenceCell, idempotencyKey: string, signal: AbortSignal): Promise<EvidenceCell>
   /** Read-only lookup of the original process projection operation. */
   inspectProcess?(cell: EvidenceCell, idempotencyKey: string, signal: AbortSignal): Promise<ExternalRecovery<EvaluationExecutionResult>>
+  /** Complete missing process, raw metrics or assertions from the same original run artifacts.
+   * Never execute another Target run or replace any already available observation. */
+  completeEvidence?(cell: EvidenceCell, idempotencyKey: string, signal: AbortSignal): Promise<EvidenceCell>
+  /** Read-only recovery of the original evidence projection operation. */
+  inspectEvidence?(cell: EvidenceCell, idempotencyKey: string, signal: AbortSignal): Promise<ExternalRecovery<EvaluationExecutionResult>>
   verifyRegressionSuite?(suiteDigest: string, universe: TaskUniverse): boolean | Promise<boolean>
 }
 export interface DiagnosisProvider {

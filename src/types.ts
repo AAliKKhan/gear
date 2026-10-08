@@ -1617,7 +1617,7 @@ export interface AdmissionResult {
 export interface PublicRoundStatus {
   resolvedObjective?: import('./objective/types.js').ResolvedObjective
   searchPendingOperation?: import('./search/types.js').PendingSearchOperation
-  searchPendingEvidence?: { planDigest: string; resultRefs: string[] }
+  searchPendingEvidence?: import('./search/types.js').PendingSearchEvidence
   searchProgress?: import('./search/types.js').SearchProgress
   search?: import('./search/engine.js').SearchRoundOutcome
   baselineReuseBlocker?: BaselineReuseBlocker

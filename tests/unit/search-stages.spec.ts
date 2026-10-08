@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { digestJson } from '../../src/state/digest.js'
-import { FailureClusterSearch } from '../../src/search/engine.js'
+import { FailureClusterSearch, SearchEvidencePending } from '../../src/search/engine.js'
 import { SearchOperationPending } from '../../src/search/recovery.js'
 import { SearchStore } from '../../src/search/store.js'
 import { validateSearchSchema } from '../../src/search/schema.js'
@@ -84,10 +84,10 @@ describe('frozen stage decisions and seed progress', () => {
       const cells = await evaluate(input)
       return input.plan.stage === 'local' ? cells.slice(1) : cells
     }
-    const result = await f.run()
-    expect(result.research.stageDecisions).toHaveLength(4)
-    expect(result.research.stageDecisions.every(d => d.outcome === 'insufficient-evidence' && !d.nextStagePlanDigest)).toBe(true)
-    expect(result.championChanged).toBe(false)
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+    expect(await f.store.read('rounds/r/local')).toBeUndefined()
+    expect(await f.store.read('rounds/r/commit')).toBeUndefined()
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
     const progress = await f.store.read<SearchProgress>('rounds/r/progress')
     expect(progress?.evaluations.filter(e => e.stage === 'local' && e.candidateId !== 'anchor').every(e => e.profile!.coverage.available < e.plannedCells)).toBe(true)
     const second = await setup(); second.config.search.evaluationStages.bridge.maxCandidates = 0
@@ -98,7 +98,7 @@ describe('frozen stage decisions and seed progress', () => {
   it('shows an unresolved bridge participant and resumes its original decision without changing local consumption', async () => {
     const f = await setup(), evaluate = f.provider.evaluate
     let pending = true
-    f.provider.inspectEvaluation = async () => ({ status: 'running', handle: 'bridge-operation' })
+    f.provider.inspectEvaluation = async () => pending ? { status: 'running', handle: 'bridge-operation' } : { status: 'not-started' }
     f.provider.evaluate = async input => {
       if (pending && input.plan.stage === 'bridge' && input.snapshot.candidateId !== 'anchor') throw new Error('bridge still running')
       return evaluate(input)
@@ -144,7 +144,7 @@ describe('frozen stage decisions and seed progress', () => {
     expect(f.executions.some(e => e.stage === 'held-out')).toBe(true)
   })
 
-  it('[R09] keeps complete local specialization when one bridge expansion lacks evidence and freezes no finalist', async () => {
+  it('[R09] repairs a partial bridge expansion before freezing a complete finalist', async () => {
     const f = await setup(), evaluate = f.provider.evaluate
     let partialId: string | undefined
     f.provider.evaluate = async input => {
@@ -156,11 +156,11 @@ describe('frozen stage decisions and seed progress', () => {
     }
     const result = await f.run(), progress = await f.store.read<SearchProgress>('rounds/r/progress')
     expect(partialId).toBeTruthy()
-    expect(result.nomineeId).toBeUndefined()
+    expect(result.nomineeId).toBeDefined()
     expect(result.research.candidates.find(c => c.candidateId === partialId)?.profile.outcomeComplete).toBe(true)
-    expect(progress?.evaluations.find(e => e.stage === 'bridge' && e.candidateId === partialId)?.profile?.outcomeComplete).toBe(false)
-    expect(result.research.stageDecisions.filter(d => d.reasonCodes.includes('incomplete-bridge-evidence'))).toHaveLength(2)
+    expect(progress?.evaluations.find(e => e.stage === 'bridge' && e.candidateId === partialId)?.profile?.outcomeComplete).toBe(true)
+    expect(result.research.stageDecisions.some(d => d.outcome === 'insufficient-evidence')).toBe(false)
     expect(result.research.scopeViews.some(v => v.outcomeEligibleIds.includes(partialId!))).toBe(true)
-    expect(f.executions.some(e => e.stage === 'global-seed')).toBe(false)
+    expect(f.executions.some(e => e.stage === 'global-seed')).toBe(true)
   })
 })
