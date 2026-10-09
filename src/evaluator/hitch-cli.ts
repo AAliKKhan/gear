@@ -2071,11 +2071,18 @@ export class HitchCliEvaluator implements RefineEvaluator, HitchTrajectoryReader
     const control = inspection.control == null ? undefined : record(inspection.control, 'Hitch eval control')
     if (control && (control.schema_version !== '1' || control.eval_id !== reservation.evalId)) throw new HitchEvaluationError('Hitch eval control identity changed', 'invalid_hitch_result')
     const state = control?.state
-    if (['queued', 'planning', 'preparing', 'running', 'finalizing', 'cancelling'].includes(String(state))) return { status: 'running' }
-    if (!inspection.result) return ['failed', 'cancelled'].includes(String(state))
-      ? { status: 'failed', code: 'hitch_eval_terminal_failure', message: `Evaluation ${reservation.evalId} is ${String(state)}` }
-      : { status: 'unknown', reason: 'existing evaluation has no durable result' }
+    if (!inspection.result) {
+      if (['queued', 'planning', 'preparing', 'running', 'finalizing', 'cancelling'].includes(String(state))) return { status: 'running' }
+      return ['failed', 'cancelled'].includes(String(state))
+        ? { status: 'failed', code: 'hitch_eval_terminal_failure', message: `Evaluation ${reservation.evalId} is ${String(state)}` }
+        : { status: 'unknown', reason: 'existing evaluation has no durable result' }
+    }
+    // Hitch persists its terminal result before updating control/progress projections.
+    // A durable result takes precedence, but must belong to this reservation.
     const result = record(inspection.result, 'Hitch existing eval result')
+    if (result.schema_version !== '1' || result.eval_id !== reservation.evalId) {
+      throw new HitchEvaluationError('Hitch eval result identity changed', 'invalid_hitch_result')
+    }
     if (result.status === 'cancelled' || result.status === 'failed' && (!Array.isArray(result.trials) || result.trials.length === 0)) {
       return { status: 'failed', code: 'hitch_eval_terminal_failure', message: `Evaluation ${reservation.evalId} is ${String(result.status)}` }
     }
