@@ -9,7 +9,7 @@ import { digestJson } from '../../src/state/digest.js'
 import { RefineStateStore } from '../../src/state/store.js'
 import { digestDatasetRef } from '../../src/state/dataset.js'
 import { attachSearchEvaluation, EvaluationSearchAdapter } from '../../src/search/evaluation-adapter.js'
-import { FailureClusterSearch } from '../../src/search/engine.js'
+import { FailureClusterSearch, SearchEvidencePending } from '../../src/search/engine.js'
 import { SearchBudgetExceeded, SearchStore } from '../../src/search/store.js'
 import { recoverExternal, SearchOperationPending } from '../../src/search/recovery.js'
 import { cellIdentity, cellKey, verifyCells } from '../../src/search/evidence.js'
@@ -535,20 +535,20 @@ describe('Gear-owned staging through the existing evaluation interface', () => {
     expect(f.requests.filter(r => r.harnessRef !== f.source.anchor.commit)).toHaveLength(1)
     vi.spyOn(Date, 'now').mockReturnValue(start + f.search.budgets.round.timeoutMs + 1000)
     const run = () => f.run(new EvaluationSearchAdapter(f.evaluator, f.options))
-    const result = await run()
-    expect(result.reasonCodes).toContain('budget-exhausted:time')
-    expect(result.championChanged).toBe(false)
-    const archive = await f.store.archive()
-    const partial = archive!.results.find(r => r.failure?.kind === 'budget-exhausted' && r.cells.length > 0)
-    expect(partial).toBeDefined()
-    expect(partial!.cells.every(cell => cell.identity.repetition === 0)).toBe(true)
+    await expect(run()).rejects.toBeInstanceOf(SearchEvidencePending)
+    const pending = (await f.store.read<import('../../src/search/types.js').PendingSearchEvidence>('rounds/r/pending-evidence'))!
+    expect(pending.reasonCodes).toEqual(['budget-exhausted:time'])
+    const partial = await f.store.object<import('../../src/search/types.js').StageResult>(pending.participants![0]!.currentRef)
+    expect(partial.cells.length).toBeGreaterThan(0)
+    expect(partial.cells.every(cell => cell.identity.repetition === 0)).toBe(true)
     expect(await f.store.read('rounds/r/pending-operation')).toBeNull()
-    expect(await f.store.read('active-round')).toEqual({ roundId: null })
-    expect(await run()).toEqual(result)
+    expect(await f.store.read('active-round')).toEqual({ roundId: 'r' })
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+    await expect(run()).rejects.toBeInstanceOf(SearchEvidencePending)
     expect(f.requests).toHaveLength(count)
   })
 
-  it.each(['scoped-frontier-membership-v1', 'epsilon-greedy-gepa-v1'] as const)('settles an expired bootstrap and reuses its cells in a later round (%s)', async parentSampling => {
+  it.each(['scoped-frontier-membership-v1', 'epsilon-greedy-gepa-v1'] as const)('preserves an expired bootstrap as repairable evidence without admitting another round (%s)', async parentSampling => {
     const f = await setup(false, 2, false, 20), write = f.provider.store.write.bind(f.provider.store), start = Date.now()
     f.search.search.parentSampling = parentSampling
     f.search.budgets.round.timeoutMs = 30000
@@ -560,24 +560,18 @@ describe('Gear-owned staging through the existing evaluation interface', () => {
     fault.mockRestore()
     vi.spyOn(Date, 'now').mockReturnValue(start + f.search.budgets.round.timeoutMs + 1000)
     const current = () => new EvaluationSearchAdapter(f.evaluator, f.options)
-    const stopped = await f.run(current())
-    expect(stopped.reasonCodes).toContain('budget-exhausted:time')
-    expect(stopped.championChanged).toBe(false)
-    expect(stopped.research.parents.batches).toEqual([])
-    expect(stopped.research.workplans).toEqual([])
+    await expect(f.run(current())).rejects.toBeInstanceOf(SearchEvidencePending)
+    const pending = (await f.store.read<import('../../src/search/types.js').PendingSearchEvidence>('rounds/r/pending-evidence'))!
+    expect(pending.reasonCodes).toEqual(['budget-exhausted:time'])
     expect(await f.store.archive()).toBeUndefined()
-    expect(await f.store.read('active-round')).toEqual({ roundId: null })
-    expect(await f.run(current())).toEqual(stopped)
+    expect(await f.store.read('active-round')).toEqual({ roundId: 'r' })
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
+    await expect(f.run(current())).rejects.toBeInstanceOf(SearchEvidencePending)
     expect(f.requests).toHaveLength(1)
-    const partial = await f.store.object<import('../../src/search/types.js').ResearchArchive>(stopped.archiveDigest)
-    expect(partial.results[0]!.cells).toHaveLength(20)
-    expect(partial.activeParentIds).toEqual([])
-    const resumed = await f.run(current(), 1)
-    expect(resumed.championChanged).toBe(true)
-    const complete = await f.store.archive()
-    for (const cell of partial.results[0]!.cells) expect(complete!.results.flatMap(r => r.cells)).toContainEqual(cell)
-    // The second round evaluates only the missing baseline repetition.
-    expect(f.requests.filter(r => r.harnessRef === f.source.anchor.commit && r.phase === 'seed-candidate' && r.dataset === f.requests[0]!.dataset)).toHaveLength(2)
+    const partial = await f.store.object<import('../../src/search/types.js').StageResult>(pending.participants![0]!.currentRef)
+    expect(partial.cells).toHaveLength(20)
+    await expect(f.run(current(), 1)).rejects.toThrow('unresolved round')
+    expect(f.requests).toHaveLength(1)
   })
 
   it('preserves uncontrolled repetition identities and reads partial results after a verified deadline', async () => {

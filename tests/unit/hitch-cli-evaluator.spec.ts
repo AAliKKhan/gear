@@ -35,6 +35,11 @@ function request(dataset: string, harnessRef: string): EvaluationRequest {
 
 interface InspectFixture {
   controlStateWithoutResult?: string
+  controlState?: string
+  resultStatus?: 'succeeded' | 'failed' | 'cancelled'
+  resultEvalId?: string
+  resultSchemaVersion?: string
+  progressStatus?: string
   attempts?: number
   tasks?: string[]
   trials?: Array<{ taskId: string; attempt: number }>
@@ -355,6 +360,12 @@ else if (args[0] === 'capabilities') {
   process.stdout.write(JSON.stringify({
     schema_version: '1', eval_id: inspectedEvalId,
     request: inspectionRequest,
+    ...(${JSON.stringify(inspectFixture.controlState ?? null)} === null ? {} : {
+      control: { schema_version: '1', eval_id: inspectedEvalId, state: ${JSON.stringify(inspectFixture.controlState)} },
+    }),
+    ...(${JSON.stringify(inspectFixture.progressStatus ?? null)} === null ? {} : {
+      progress: { schema_version: '1', eval_id: inspectedEvalId, status: ${JSON.stringify(inspectFixture.progressStatus)} },
+    }),
     ...(submitted ? { submission: {
       schema_version: '1', eval_id: inspectedEvalId, request: inspectionRequest,
       execution: inspectionExecution,
@@ -369,8 +380,8 @@ else if (args[0] === 'capabilities') {
         harness_ref: 'deepseek@commit:' + ${JSON.stringify(planCommit)}, harness_id: 'deepseek',
         revision_identity: 'sha256:' + '2'.repeat(64) } },
     result: {
-      schema_version: '1', eval_id: inspectedEvalId,
-      status: inspectedInvalidTrials.length === 0 ? 'succeeded' : 'failed',
+      schema_version: ${JSON.stringify(inspectFixture.resultSchemaVersion ?? '1')}, eval_id: ${JSON.stringify(inspectFixture.resultEvalId)} ?? inspectedEvalId,
+      status: ${JSON.stringify(inspectFixture.resultStatus)} ?? (inspectedInvalidTrials.length === 0 ? 'succeeded' : 'failed'),
       exit_code: inspectedInvalidTrials.length === 0 ? 0 : 1,
       candidate: { harness_ref: 'deepseek@commit:' + actual, revision_identity: 'sha256:' + '2'.repeat(64) },
       dataset: ${JSON.stringify(inspectedDataset)},
@@ -468,6 +479,41 @@ describe('HitchCliEvaluator', () => {
     expect(result.status).toBe(['failed', 'cancelled'].includes(controlStateWithoutResult) ? 'failed' : controlStateWithoutResult === 'succeeded' ? 'unknown' : 'running')
     const calls = (await readFile(invocationLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
     expect(calls.filter(c => c[0] === 'eval')).toEqual([['eval', 'inspect', reservation.evalId, '--json']])
+  })
+  it.each(['running', 'finalizing', 'cancelling'])('uses durable results when control remains %s and progress remains running', async controlState => {
+    for (const resultStatus of ['cancelled', 'failed', 'succeeded'] as const) {
+      const { fixture, evaluator, invocationLog } = await setup('0.2.5', {
+        controlState, progressStatus: 'running', resultStatus,
+        ...(resultStatus === 'failed' ? { trials: [] } : {}),
+      })
+      const state = round(fixture.root, fixture.championRef, fixture.manifest.digest), input = request('seed', fixture.championRef)
+      const reservation = await evaluator.reserve(state, input)
+      const result = await evaluator.inspectResult(state, input, reservation, new AbortController().signal)
+      expect(result.status).toBe(resultStatus === 'succeeded' ? 'complete' : 'failed')
+      if (result.status === 'failed') expect(result.code).toBe('hitch_eval_terminal_failure')
+      const calls = (await readFile(invocationLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+      expect(calls.filter(c => c[0] === 'eval')).toEqual([['eval', 'inspect', reservation.evalId, '--json']])
+    }
+  })
+  it.each([
+    { resultEvalId: `eval_${'f'.repeat(32)}` },
+    { resultSchemaVersion: 'unsupported' },
+  ])('rejects mismatched terminal result identity before classifying failure: %j', async mismatch => {
+    const { fixture, evaluator } = await setup('0.2.5', { controlState: 'running', resultStatus: 'cancelled', ...mismatch })
+    const state = round(fixture.root, fixture.championRef, fixture.manifest.digest), input = request('seed', fixture.championRef)
+    const reservation = await evaluator.reserve(state, input)
+    await expect(evaluator.inspectResult(state, input, reservation, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'invalid_hitch_result' })
+  })
+  it('keeps incomplete failed evidence available for repair despite stale active control', async () => {
+    const { fixture, evaluator } = await setup('0.2.5', {
+      controlState: 'finalizing', resultStatus: 'failed', invalidTrials: [{ taskId: 'task-1', attempt: 1 }],
+    })
+    const state = round(fixture.root, fixture.championRef, fixture.manifest.digest), input = request('seed', fixture.championRef)
+    const reservation = await evaluator.reserve(state, input)
+    const result = await evaluator.inspectResult(state, input, reservation, new AbortController().signal)
+    expect(result.status).toBe('complete')
+    if (result.status === 'complete') expect(result.evidence.completeness).toBe('partial')
   })
   it('reads an existing evaluation through the existing inspect command without starting or rerunning it', async () => {
     const { fixture, evaluator, invocationLog } = await setup()

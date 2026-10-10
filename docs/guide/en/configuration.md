@@ -46,3 +46,5 @@ For a supported daemon deployment, start one daemon for that root and use `mode:
 ## Advanced paths
 
 [Context offloading](../../dsh-meta-context-offloading-spec.zh-CN.md) applies to the native DSH Meta adapter and must be sealed before the evolution starts. [Algorithm settings](example-algorithm.md) belong to their specific search implementation. [Training configuration](training.md) is a separate controller contract. The [source schema](../../../src/config.ts) remains authoritative for this checkout.
+
+Incomplete staged search evaluations use `search.evaluationStages.repair`: by default, up to three extra repairs after 15/60/180 seconds plus bounded jitter. Omitting the field remains compatible with existing configuration. Repairs share the original cell, repair-cell and time budgets. See the [recovery contract](../../search-evaluation-recovery.zh-CN.md).

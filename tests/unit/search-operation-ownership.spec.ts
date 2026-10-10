@@ -9,6 +9,7 @@ import type { ResearchArchive, StageResult } from '../../src/search/types.js'
 
 function setup() {
   const f = fixtures(20), store = new MemorySearchStore(), config = settings()
+  config.search.evaluationStages.repair = { maxAttempts: 0, backoffMs: [0], jitterMs: 0 }
   const request = { evolutionId: 'ownership', roundId: 'r', roundIndex: 0, maxCandidates: 1,
     anchor: f.anchor, championRevisionDigest: digestJson('revision'), settings: config }
   const engine = () => new FailureClusterSearch(store, f.provider, f.diagnosis, f.hooks)
@@ -169,7 +170,8 @@ describe('search operation ownership', () => {
       expect(repaired.cells).toEqual(expect.arrayContaining(current.cells))
       await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
       pending = (await f.store.read<typeof originalPending>('rounds/r/pending-evidence'))!
-      expect(pending).toEqual(originalPending)
+      expect(pending.planDigest).toBe(originalPending.planDigest)
+      expect(pending.resultRefs).toEqual(originalPending.resultRefs)
       await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
       expect(f.executions).toHaveLength(calls + 1)
       expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
@@ -188,12 +190,12 @@ describe('search operation ownership', () => {
     expect((await f.run()).championChanged).toBe(true)
   })
 
-  it('still terminates a bootstrap that cannot reserve its frozen rollout budget', async () => {
+  it('keeps a bootstrap budget gap pending without installing a terminal rejection', async () => {
     const f = setup()
     f.config.budgets.round.maxNewRolloutCells = 0
-    const outcome = await f.run()
-    expect(outcome.reasonCodes).toContain('budget-exhausted:round.cells')
-    expect(await f.store.read('rounds/r/terminal')).toBeDefined()
+    await expect(f.run()).rejects.toBeInstanceOf(SearchEvidencePending)
+    expect(await f.store.read('rounds/r/pending-evidence')).toMatchObject({ state: 'infrastructure-incomplete', reasonCodes: ['budget-exhausted:round.cells'] })
+    expect(await f.store.read('rounds/r/terminal')).toBeUndefined()
     expect(f.executions).toHaveLength(0)
   })
 
@@ -218,6 +220,7 @@ describe('search operation ownership', () => {
     await expect(f.run()).rejects.toThrow('unresolved completion')
     expect(f.store.checkpoint()).toEqual(before)
     f.provider.evaluate = evaluate
+    f.provider.inspectEvaluation = async () => ({ status: 'not-started' })
     await f.complete('pending')
     expect((await f.run()).championChanged).toBe(true)
   })

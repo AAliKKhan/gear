@@ -70,7 +70,7 @@ export function snapshot(id: string, parentIds: string[] = [], sameTree?: string
 }
 export function settings(): SearchSettings {
   const budget = { maxNewRolloutCells: 10000, maxDiagnosisInputTokens: 100000, maxDiagnosisOutputTokens: 20000, maxGenerationTokens: 10000, maxGenerationRequests: 100, maxRepairCells: 20, timeoutMs: 600000 }
-  return { search: structuredClone(defaultSearchConfig), promotion: structuredClone(defaultMultisignalPromotion), budgets: { round: { ...budget }, evolution: { ...budget } }, regression: { collectFailures: false, maxProposals: 50 } }
+  return { search: { ...structuredClone(defaultSearchConfig), evaluationStages: { ...structuredClone(defaultSearchConfig.evaluationStages), repair: { backoffMs: [0], jitterMs: 0 } } }, promotion: structuredClone(defaultMultisignalPromotion), budgets: { round: { ...budget }, evolution: { ...budget } }, regression: { collectFailures: false, maxProposals: 50 } }
 }
 export function revise<T extends { digest: string }>(record: T, patch: Partial<Omit<T, 'digest'>>): T {
   const { digest: ignored, ...body } = record

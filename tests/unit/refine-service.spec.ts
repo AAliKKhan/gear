@@ -4728,11 +4728,12 @@ describe('RefineService evolution workspaces', () => {
 })
 
 describe('explicit staged search control-plane integration', () => {
-  it.each(['complete', 'dispose'] as const)('owns the staged repair materialization lock through %s', async mode => {
+  it.each(['complete', 'dispose', 'automatic'] as const)('owns the staged repair materialization lock through %s', async mode => {
     const { service, evaluator, git } = await setup()
     await standardSearchDataset(git.root, 10, 'seed', false)
     await standardSearchDataset(git.root, 10, 'held-out', false)
     service.options.searchSettings = searchSettings()
+    if (mode !== 'automatic') service.options.searchSettings.search.evaluationStages.repair = { maxAttempts: 0, backoffMs: [0], jitterMs: 0 }
     const requests: string[][] = [], started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
     evaluator.evaluationIdentity = (_round, request) => ({ provider: 'fake', effectiveConfigDigest: digestJson(request.condition), invocationFingerprint: digestJson(request.condition) })
     ;(evaluator as RefineEvaluator).evaluate = async (_round, request, signal, reservation) => {
@@ -4761,6 +4762,25 @@ describe('explicit staged search control-plane integration', () => {
     }
     try {
       const admitted = await service.admit('api'), store = service.registry.stateStore(admitted.evolutionId)
+      if (mode === 'automatic') {
+        await started.promise
+        const status = await service.status(admitted.evolutionId, admitted.roundId)
+        expect(status.searchPendingEvidence).toMatchObject({ state: 'repairing', participants: [{ attempts: [{ number: 1, state: 'running' }] }] })
+        expect(requests).toEqual([Array.from({ length: 10 }, (_, i) => `task-${i}`), ['task-9']])
+        await expect(store.acquireRoundLock(admitted.roundId)).rejects.toThrow('lock is owned')
+        release.resolve()
+        const finished = await eventually(() => store.readRound(admitted.roundId), r => ['candidate-editing', 'accepted', 'rejected', 'failed'].includes(r?.status ?? ''))
+        expect(finished?.status, finished?.failure?.message).not.toBe('failed')
+        expect(await store.readChampion()).toMatchObject({ ref: git.championRef })
+        const journal = new SearchStore(join(store.root, 'search'))
+        const originalRef = status.searchPendingEvidence!.resultRefs[0]!
+        const pointer = (await journal.read<{ ref: string }>(`rounds/${admitted.roundId}/repair-${originalRef.slice(7)}`))!
+        const complete = await journal.object<import('../../src/search/types.js').StageResult>(pointer.ref)
+        expect(complete.cells).toHaveLength(10)
+        expect(complete.cells.every(c => c.outcomeCertified && c.outcome.status === 'available')).toBe(true)
+        expect((await service.status(admitted.evolutionId, admitted.roundId)).searchPendingEvidence).toBeUndefined()
+        return
+      }
       await eventually(() => store.readRound(admitted.roundId), r => r?.status === 'failed')
       await eventually(async () => service.activeEntry(admitted.roundId), value => value === undefined)
       const status = await service.status(admitted.evolutionId, admitted.roundId)
@@ -5164,7 +5184,8 @@ describe('explicit staged search control-plane integration', () => {
     const evaluate = fixture.provider.evaluate.bind(fixture.provider)
     let ready = recovery === 'none' || recovery === 'champion-commit', championWrites = 0
     let restarted: RefineService | undefined
-    fixture.provider.inspectEvaluation = async () => ({ status: 'running', handle: 'remote-heldout-17' })
+    const inspectEvaluation = fixture.provider.inspectEvaluation!.bind(fixture.provider)
+    fixture.provider.inspectEvaluation = async input => ready ? inspectEvaluation(input) : { status: 'running', handle: 'remote-heldout-17' }
     fixture.provider.evaluate = async input => {
       let cells = await evaluate({ ...input, snapshot: { ...input.snapshot, candidateId: input.snapshot.commit === git.championRef ? 'anchor' : input.snapshot.candidateId } })
       if (variableRepetitions && input.snapshot.commit === git.championRef) cells = cells.map(cell => revise(cell, {

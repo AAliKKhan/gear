@@ -11,6 +11,9 @@ export class SearchExecutionFailure extends Error {
     this.failure = { kind: 'execution-failure', code, message, evidenceRef }
   }
 }
+export class SearchEvidencePending extends Error {
+  constructor(readonly planDigest: string) { super(`search stage needs evidence repair: ${planDigest}`); this.name = 'SearchEvidencePending' }
+}
 export class SearchOperationPending extends Error {
   constructor(readonly operation: PendingSearchOperation) {
     super(`${operation.kind} operation pending: ${operation.reason}`); this.name = 'SearchOperationPending'
@@ -45,7 +48,8 @@ export async function recoverExternal<T>(input: {
   if (signal.aborted && !expired()) signal.throwIfAborted()
   if (expired() && !input.previouslyReserved) return { value: input.failed(budgetFailure('time'), []), notStarted: true }
   let reason = 'deadline reached while external execution was unresolved'
-  if (!expired()) {
+  const inspectFirst = input.previouslyReserved && input.operation.kind === 'evaluation' && !!input.inspect
+  if (!expired() && !inspectFirst) {
     try { return { value: await input.run(), notStarted: false } }
     catch (error) {
       inspectionSignal.throwIfAborted()
@@ -67,6 +71,27 @@ export async function recoverExternal<T>(input: {
   invariant(state && ['complete', 'not-started', 'partially-complete', 'running', 'unknown'].includes(state.status), 'invalid external recovery state')
   if (state.status === 'running') invariant(typeof state.handle === 'string' && state.handle.length > 0, 'running recovery needs its original handle')
   if (state.status === 'complete') return { value: state.result, notStarted: false }
+  if (inspectFirst && !expired() && (state.status === 'not-started' || state.status === 'partially-complete')) {
+    try { return { value: await input.run(), notStarted: false } }
+    catch (error) {
+      inspectionSignal.throwIfAborted()
+      if (error instanceof SearchProtocolError) throw error
+      if (error instanceof SearchExecutionFailure) return { value: input.failed(error.failure, error.cells), notStarted: false }
+      reason = error instanceof Error ? error.message : String(error)
+      // The resumed call may have submitted remote work. Never retain its
+      // earlier not-started claim after losing the new response.
+      state = { status: 'unknown', reason }
+      try { state = await input.inspect!(AbortSignal.any([inspectionSignal, AbortSignal.timeout(10000)])) }
+      catch (inspectionError) {
+        inspectionSignal.throwIfAborted()
+        if (inspectionError instanceof SearchProtocolError) throw inspectionError
+        if (inspectionError instanceof SearchExecutionFailure) return { value: input.failed(inspectionError.failure, inspectionError.cells), notStarted: false }
+      }
+      if (state.status === 'complete') return { value: state.result, notStarted: false }
+    }
+  }
+  invariant(state && ['complete', 'not-started', 'partially-complete', 'running', 'unknown'].includes(state.status), 'invalid external recovery state')
+  if (state.status === 'running') invariant(typeof state.handle === 'string' && state.handle.length > 0, 'running recovery needs its original handle')
   if (state.status === 'partially-complete') {
     invariant(input.operation.kind === 'evaluation' && Array.isArray(state.cells) && state.cells.length > 0, 'partial recovery requires completed evaluation cells')
     if (expired()) return { value: input.failed(budgetFailure('time'), state.cells), notStarted: false }

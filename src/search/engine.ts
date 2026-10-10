@@ -13,7 +13,9 @@ import { parentSelectionInput, selectParentsWithPolicy } from './parent-selectio
 import { resolveParentPolicyRef } from './policies/parents.js'
 import type { PromotionInput } from './promotion.js'
 import { assessGate, decideFinal, precheckSeed, rankProfiles } from './promotion.js'
-import { searchDeadline } from './recovery.js'
+import { searchDeadline, SearchEvidencePending } from './recovery.js'
+import { evaluationProcessMode } from './repair.js'
+export { SearchEvidencePending } from './recovery.js'
 import type { RegressionProposal } from './regression.js'
 import { collectFailure, sanitizedRegressionPrompt } from './regression.js'
 import { SearchExecutionRuntime, type GeneratedCandidate, type PreparedWork, type SearchAdmission, type SearchExecutionHooks } from './runtime.js'
@@ -38,9 +40,6 @@ export interface SearchEvolutionIdentity {
   algorithmIntegrity: string
   parentPolicy?: import('../types.js').ComponentRef<unknown>
   digest: string
-}
-export class SearchEvidencePending extends Error {
-  constructor(readonly planDigest: string) { super(`search stage needs evidence repair: ${planDigest}`); this.name = 'SearchEvidencePending' }
 }
 export interface SearchRoundOutcome {
   schemaVersion: 2
@@ -119,8 +118,8 @@ export class FailureClusterSearch {
     }
     const completion = await this.store.read<{ id: string }>('active-completion')
     invariant(!completion || await this.store.read(`rounds/${completion.id}/result`), 'search has an unresolved completion; resume its original completion ID')
-    const repair = await this.store.read<{ id: string }>(`rounds/${request.roundId}/active-repair`)
-    invariant(!repair || await this.store.read(`rounds/${request.roundId}/repair-result-${digestJson(repair.id).slice(7)}`), 'round has an unresolved repair; resume its original repair ID')
+    const repair = await this.store.read<{ id: string; originalRef?: string; automatic?: boolean }>(`rounds/${request.roundId}/active-repair`)
+    invariant(!repair || await this.store.read(`rounds/${request.roundId}/repair-result-${digestJson(repair.id).slice(7)}`) || saved && await this.runtime.ownsAutomaticRepair(request.roundId, repair), 'round has an unresolved repair; resume its original repair ID')
     const existingIntent = await this.store.read<{ ref: string }>(`rounds/${request.roundId}/commit`)
     if (existingIntent) return this.runtime.reconcile(request.roundId, await this.store.object<CommitIntent>(existingIntent.ref))
     signal.throwIfAborted()
@@ -149,10 +148,11 @@ export class FailureClusterSearch {
     try {
     const resolution = resolveSizing(seed, settings.search.taskSetSizing)
     const evaluate = async (u: TaskUniverse, p: StageEvaluationPlan, s: Snapshot) => {
-      await this.runtime.evaluationProgress(request.roundId, u, p, s, settings.search.process.mode)
+      const mode = evaluationProcessMode(p, settings)
+      await this.runtime.evaluationProgress(request.roundId, u, p, s, mode)
       const result = await this.runtime.evaluate(admission, startedAt, u, p, s, signal, inspectionSignal)
-      await this.runtime.evaluationProgress(request.roundId, u, p, s, settings.search.process.mode, result)
-      return result
+      await this.runtime.evaluationProgress(request.roundId, u, p, s, mode, result)
+      return this.runtime.ensureEvaluationComplete({ ...admission, settings }, u, p, s, result, signal, inspectionSignal)
     }
     const initialSnapshot = seed.objective ? await this.store.freezeEvolution('objective-initial-harness', () => anchor) : undefined
     const initialBaseline = async (universe: TaskUniverse, plan: StageEvaluationPlan): Promise<ObjectiveBaseline | undefined> => {
@@ -164,10 +164,12 @@ export class FailureClusterSearch {
         const result = await evaluate(universe, referencePlan, initialSnapshot!)
         const projected = objectiveProfile(universe, plan.taskIds, result.cells)
         if (result.failure || !projected.objectiveComplete) {
-          await this.store.write(`rounds/${request.roundId}/pending-evidence`, { planDigest: referencePlan.digest, resultRefs: [result.digest] })
+          await this.runtime.pendingEvidence(request.roundId, universe, referencePlan, initialSnapshot!, result, settings, ['incomplete-objective-initial-reference'])
           throw new SearchEvidencePending(referencePlan.digest)
         }
-        return seal({ scopeDigest: projected.objectiveScore!.scopeDigest, metrics: projected.rawMetrics!, initialSnapshotDigest: initialSnapshot!.digest, resultDigest: result.digest })
+        const reference = seal({ scopeDigest: projected.objectiveScore!.scopeDigest, metrics: projected.rawMetrics!, initialSnapshotDigest: initialSnapshot!.digest, resultDigest: result.digest })
+        await this.runtime.consume(admission.roundId, result, 'objective-reference', reference.digest)
+        return reference
       })
     }
     await this.runtime.progress(request.roundId, 'bootstrap')
@@ -185,42 +187,6 @@ export class FailureClusterSearch {
       const baselinePlan = seal(body)
       const result = await evaluate(seed, baselinePlan, anchor)
       const p = profile(seed, baselinePlan, anchor, result, settings.search.process.mode, bootstrapScope.weights)
-      if (result.failure?.kind === 'execution-failure'
-        || !result.failure && !(seed.objective ? p.objectiveComplete : p.outcomeComplete)) {
-        // evaluate() may return a later repair, but every repair must target the
-        // frozen original evaluation. Keep that reference stable while this
-        // incomplete bootstrap blocks admission of the next round.
-        const original = await this.store.read<{ ref: string }>(`rounds/${request.roundId}/evaluation-${digestJson([baselinePlan.digest, anchor.digest]).slice(7)}`)
-        invariant(original, 'missing bootstrap evaluation')
-        await this.store.write(`rounds/${request.roundId}/pending-evidence`, { planDigest: baselinePlan.digest, resultRefs: [original.ref] })
-        throw new SearchEvidencePending(baselinePlan.digest)
-      }
-      if (result.failure) {
-        // Frozen budget exhaustion still terminates the round, without installing
-        // incomplete evidence as the parent archive.
-        const research = buildArchive({ evolutionId: admission.evolutionId, universe: seed, snapshots: [anchor], scopes: [bootstrapScope],
-          results: [result], plans: [baselinePlan], config: { ...settings.search, parentPolicy: parentPolicy.ref },
-          championId: anchor.candidateId, includeChampion: parentPolicy.requiresChampion })
-        const selectionInput = parentSelectionInput(research, request.roundId, admission.maxCandidates, settings.search.seed, anchor.candidateId)
-        const reasonCodes = [`${result.failure.kind}:${result.failure.code}`, 'bootstrap-execution-unavailable']
-        const parents: ParentSelectionDecision = seal({ archiveDigest: research.digest, algorithmRef: 'sha256-counter-v1' as const,
-          randomSeed: selectionInput.randomSeed, batches: [], policy: { ref: parentPolicy.ref, inputDigest: digestJson(selectionInput), parentProbabilities: {}, reasonCodes } })
-        const preparation: ScopeEpochPreparation = seal({ archiveCutoffDigest: research.digest, epoch: scopeEpoch(settings, request.roundIndex),
-          sharedTaskIds: [], ruleDigest: digestJson(settings.search.scopeSampling), scopes: [], plans: [], results: [], decisions: [] })
-        const decision: EvaluationStageDecision = seal({ stagePlanDigest: baselinePlan.digest, candidateId: anchor.candidateId,
-          outcome: 'insufficient-evidence' as const, reasonCodes, supportDigest: result.digest })
-        for (const record of [research, parents, preparation]) await this.store.put(record)
-        await this.runtime.decisionProgress(request.roundId, [decision])
-        const outcome: SearchRoundOutcome = seal({ schemaVersion: 2 as const, roundId: request.roundId, archiveDigest: research.digest,
-          championAnchorDigest: anchor.digest, championChanged: false,
-          advisory: settings.promotion.validationMode === 'shared-set-research' && settings.promotion.allowSharedSetPromotion !== true,
-          validationMode: settings.promotion.validationMode, reasonCodes, findings: [],
-          research: { sizing: resolution, parents, workplans: [], scopeViews: research.scopeViews, parentProbabilities: {},
-            bridge: seal({ skipped: [], exclusions: [] }), scopePreparation: preparation, stageDecisions: [decision], candidates: [],
-            remainingBudget: await this.store.remaining(request.roundId, settings.budgets) } })
-        inspectionSignal.throwIfAborted()
-        return this.runtime.recordTerminal(request.roundId, outcome)
-      }
       invariant(passesExploration(bootstrapScope, p, seed), 'bootstrap baseline is incomplete or fails exploration guards')
       archive = buildArchive({ evolutionId: admission.evolutionId, universe: seed, snapshots: [anchor], scopes: [bootstrapScope], results: [result], plans: [baselinePlan], config: settings.search, championId: anchor.candidateId, includeChampion: parentPolicy.requiresChampion })
       await this.store.put(archive)
@@ -259,7 +225,7 @@ export class FailureClusterSearch {
     const planning = await this.store.freeze(request.roundId, 'planning', async () => {
       const works: PreparedWork[] = [], cancelled: string[] = [], scopes = [...archive!.scopes, ...preparation.scopes]
       const diagnosedClusters: import('./types.js').FailureCluster[] = []
-      const baselineResults: StageResult[] = [], baselinePlans: StageEvaluationPlan[] = []
+      const baselineResults: StageResult[] = [], baselinePlans: StageEvaluationPlan[] = [], usedResults: StageResult[] = []
       const shared = preparation.sharedTaskIds
       const usedHypotheses = new Set<string>()
       for (const batch of parents.batches) {
@@ -269,6 +235,7 @@ export class FailureClusterSearch {
         const probe = stagePlan({ stage: 'baseline-probe', partition: 'seed', universeDigest: seed.digest, taskSetSizeResolutionDigest: resolution.digest,
           scopeDigest: parentScope.digest, taskIds: parentScope.taskIds, participantIds: [parent.candidateId], prerequisiteDecisionDigests: [parents.digest, preparation.digest], selectionRuleDigest: integrity })
         const baseline = await evaluate(seed, probe, parent)
+        usedResults.push(baseline)
         const p = profile(seed, probe, parent, baseline, settings.search.process.mode, parentScope.weights)
         if (seed.objective ? !scoringComplete(p) : !p.outcomeComplete) { cancelled.push('parent-baseline-incomplete'); continue }
         let dossier: DiagnosisDossier
@@ -305,6 +272,7 @@ export class FailureClusterSearch {
             const localPlan = stagePlan({ stage: 'local', partition: 'seed', universeDigest: seed.digest, taskSetSizeResolutionDigest: resolution.digest,
               scopeDigest: scope.digest, taskIds: scope.taskIds, participantIds: [candidateId, parent.candidateId], prerequisiteDecisionDigests: [parents.digest], selectionRuleDigest: integrity })
             const localBaseline = await evaluate(seed, localPlan, parent)
+            usedResults.push(localBaseline)
             const parentProfile = profile(seed, localPlan, parent, localBaseline, settings.search.process.mode, scope.weights)
             if (!passesExploration(scope, parentProfile, seed) || !cluster.taskIds.some(id => parentProfile.tasks.some(t => t.taskId === id && (seed.objective ? t.objectiveScore?.score !== undefined : t.outcome! < seed.tasks.find(t => t.id === id)!.successUtility)))) { cancelled.push(`hypothesis-unconfirmed:${cluster.familyId}`); continue }
             const slots = Math.max(1, admission.maxCandidates - works.length)
@@ -325,7 +293,7 @@ export class FailureClusterSearch {
       }
       const planned = seal({ works, cancelled, scopes, baselineResults, baselinePlans, diagnosedClusters })
       await this.store.put(planned)
-      for (const work of works) await this.runtime.consume(admission.roundId, work.baseline, 'workplans', planned.digest)
+      for (const result of usedResults) await this.runtime.consume(admission.roundId, result, 'workplans', planned.digest)
       return planned
     })
     await this.runtime.progress(request.roundId, 'generation')
@@ -405,29 +373,29 @@ export class FailureClusterSearch {
         stages.push(bp); results.push(br)
         const rankings: Array<{ id: string; profile: ReturnType<typeof profile> }> = []
         const bridgeGates: Array<{ candidateId: string; gate: GateDecision; result: StageResult }> = []
-        let incomplete = false
         for (const id of bp.participantIds.filter(id => id !== anchor.candidateId)) {
           const s = local.entries.find(e => e.snapshot.candidateId === id)!.snapshot, result = await evaluate(seed, bp, s)
           results.push(result)
           const g = assessGate({ universe: seed, plan: bp, anchor, candidate: s, baseline: br, result, initialBaseline: reference }, settings.promotion, false)
+          if (g.outcome === 'insufficient-evidence') {
+            await this.runtime.pendingEvidence(request.roundId, seed, bp, s, result, settings, g.reasonCodes)
+            throw new SearchEvidencePending(bp.digest)
+          }
           bridgeGates.push({ candidateId: id, gate: g, result })
           if (g.outcome === 'eligible') rankings.push({ id, profile: profile(seed, bp, s, result, settings.promotion.process.mode) })
-          else if (g.outcome === 'insufficient-evidence') incomplete = true
           if (result.failure) reasons.push(`${result.failure.kind}:${result.failure.code}`)
         }
-        if (incomplete) reasons.push('incomplete-bridge-evidence')
         if (br.failure) reasons.push(`${br.failure.kind}:${br.failure.code}`)
         const nomination = await this.store.freeze(request.roundId, 'nomination', async () => {
-          const candidateId = incomplete ? null : rankProfiles(seed, rankings)[0] ?? null
+          const candidateId = rankProfiles(seed, rankings)[0] ?? null
           const decisions: EvaluationStageDecision[] = []
           for (const entry of bridgeGates) {
             const support = seal({ scopeDigest: bp.scopeDigest, baselineDigest: br.digest, resultDigest: entry.result.digest, gate: entry.gate })
             await this.store.put(support)
             const advance = entry.candidateId === candidateId
-            const insufficient = entry.gate.outcome === 'insufficient-evidence' || incomplete && entry.gate.outcome === 'eligible'
             decisions.push(seal({ stagePlanDigest: bp.digest, candidateId: entry.candidateId,
-              outcome: advance ? 'advance' as const : insufficient ? 'insufficient-evidence' as const : entry.gate.outcome === 'eligible' ? 'retained-local' as const : 'ineligible' as const,
-              reasonCodes: advance ? ['selected-for-global-seed'] : insufficient ? ['incomplete-bridge-evidence'] : entry.gate.outcome === 'eligible' ? ['not-selected-for-global-seed'] : entry.gate.reasonCodes,
+              outcome: advance ? 'advance' as const : entry.gate.outcome === 'eligible' ? 'retained-local' as const : 'ineligible' as const,
+              reasonCodes: advance ? ['selected-for-global-seed'] : entry.gate.outcome === 'eligible' ? ['not-selected-for-global-seed'] : entry.gate.reasonCodes,
               supportDigest: support.digest, ...(advance ? { nextStagePlanDigest: this.fullPlan(admission, seed, 'global-seed', [anchor.candidateId, entry.candidateId], resolution.digest).digest } : {}) }))
           }
           const decision = seal({ candidateId, bridgeDigest: bp.digest, decisions })
@@ -445,6 +413,10 @@ export class FailureClusterSearch {
           stages.push(gp); results.push(baseline, result)
           seedInput = { universe: seed, plan: gp, anchor, candidate: nominee, baseline, result, initialBaseline: await initialBaseline(seed, gp) }
           gate = precheckSeed(seedInput, settings.promotion)
+          if (gate.outcome === 'insufficient-evidence') {
+            await this.runtime.pendingEvidence(request.roundId, seed, gp, nominee, result, settings, gate.reasonCodes)
+            throw new SearchEvidencePending(gp.digest)
+          }
           for (const r of [baseline, result]) if (r.failure) reasons.push(`${r.failure.kind}:${r.failure.code}`)
         }
       }
@@ -499,8 +471,8 @@ export class FailureClusterSearch {
         const baseline = await evaluate(heldOut, hp, anchor), result = await evaluate(heldOut, hp, nominee)
         gate = decideFinal(seedInput, { universe: heldOut, plan: hp, anchor, candidate: nominee, baseline, result, initialBaseline: reference }, settings.promotion)
         for (const r of [baseline, result]) if (r.failure) reasons.push(`${r.failure.kind}:${r.failure.code}`)
-        if (gate.outcome === 'insufficient-evidence' && !baseline.failure && !result.failure) {
-          await this.store.write(`rounds/${request.roundId}/pending-evidence`, { planDigest: hp.digest, resultRefs: [baseline.digest, result.digest] })
+        if (gate.outcome === 'insufficient-evidence') {
+          await this.runtime.pendingEvidence(request.roundId, heldOut, hp, nominee, result, settings, gate.reasonCodes)
           throw new SearchEvidencePending(hp.digest)
         }
       }

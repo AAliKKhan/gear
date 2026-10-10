@@ -778,6 +778,247 @@
       ],
       "additionalProperties": false
     },
+    "EvaluationRepairConfig": {
+      "type": "object",
+      "properties": {
+        "maxAttempts": {
+          "type": "number"
+        },
+        "backoffMs": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "jitterMs": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvaluationRepairAttempt": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "number": {
+          "type": "number"
+        },
+        "scheduledAt": {
+          "type": "number"
+        },
+        "notBefore": {
+          "type": "number"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "const": "scheduled"
+            },
+            {
+              "const": "running"
+            },
+            {
+              "const": "complete"
+            }
+          ]
+        },
+        "resultRef": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "number",
+        "scheduledAt",
+        "notBefore",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "AutomaticEvaluationRepair": {
+      "type": "object",
+      "properties": {
+        "originalRef": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "maxAttempts": {
+              "type": "number"
+            },
+            "backoffMs": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "jitterMs": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "maxAttempts",
+            "backoffMs",
+            "jitterMs"
+          ],
+          "additionalProperties": false
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvaluationRepairAttempt"
+          }
+        }
+      },
+      "required": [
+        "originalRef",
+        "policy",
+        "attempts"
+      ],
+      "additionalProperties": false
+    },
+    "MissingEvaluationSlot": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/CellIdentity"
+        },
+        "channel": {
+          "anyOf": [
+            {
+              "const": "outcome"
+            },
+            {
+              "const": "process"
+            },
+            {
+              "const": "raw-metric"
+            },
+            {
+              "const": "assertion"
+            }
+          ]
+        },
+        "metric": {
+          "type": "string"
+        },
+        "assertionId": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "unsupported"
+            },
+            {
+              "const": "missing"
+            },
+            {
+              "const": "invalid"
+            }
+          ]
+        },
+        "repair": {
+          "anyOf": [
+            {
+              "const": "unsupported"
+            },
+            {
+              "const": "execution"
+            },
+            {
+              "const": "projection"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "channel",
+        "status",
+        "repair",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "PendingSearchEvidence": {
+      "type": "object",
+      "properties": {
+        "planDigest": {
+          "type": "string"
+        },
+        "resultRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "anyOf": [
+            {
+              "const": "repairing"
+            },
+            {
+              "const": "infrastructure-incomplete"
+            }
+          ]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidateId": {
+                "type": "string"
+              },
+              "originalRef": {
+                "type": "string"
+              },
+              "currentRef": {
+                "type": "string"
+              },
+              "missingSlots": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/MissingEvaluationSlot"
+                }
+              },
+              "attempts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/EvaluationRepairAttempt"
+                }
+              }
+            },
+            "required": [
+              "candidateId",
+              "originalRef",
+              "currentRef",
+              "missingSlots",
+              "attempts"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "planDigest",
+        "resultRefs"
+      ],
+      "additionalProperties": false
+    },
     "SearchConfig": {
       "type": "object",
       "properties": {
@@ -993,6 +1234,9 @@
             },
             "reuseValidCells": {
               "const": true
+            },
+            "repair": {
+              "$ref": "#/$defs/EvaluationRepairConfig"
             }
           },
           "required": [
@@ -2167,6 +2411,9 @@
             },
             {
               "const": "research-archive"
+            },
+            {
+              "const": "objective-reference"
             }
           ]
         },
@@ -3400,6 +3647,22 @@
         "metricContractDigests",
         "comparison",
         "digest"
+      ],
+      "additionalProperties": false
+    },
+    "CellVerification": {
+      "type": "object",
+      "properties": {
+        "cell": {
+          "$ref": "#/$defs/EvidenceCell"
+        },
+        "identity": {
+          "$ref": "#/$defs/CellIdentity"
+        }
+      },
+      "required": [
+        "cell",
+        "identity"
       ],
       "additionalProperties": false
     },

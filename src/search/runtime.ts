@@ -5,11 +5,12 @@ import { deliveredWorkplan, validateReceipt } from './diagnosis.js'
 import { assertCell, cellIdentity, cellKey, completeEvidence, plannedCells, profile, reusableCells, validOutcome, verifyCells } from './evidence.js'
 import { objectiveProfile, trialPassed } from './objective.js'
 import { resolveParentPolicyRef } from './policies/parents.js'
-import { budgetFailure, recoverExternal, resolvePendingOperation, searchDeadline } from './recovery.js'
+import { budgetFailure, recoverExternal, resolvePendingOperation, searchDeadline, SearchEvidencePending } from './recovery.js'
+import { evaluationProcessMode, evaluationRepairPolicy, missingEvaluationSlots, repairDelay, waitForRepair } from './repair.js'
 import { resolveRegressionSettings } from './regression.js'
 import { validateSearchSchema } from './schema.js'
 import { SearchBudgetExceeded, zeroUsage, type SearchJournal } from './store.js'
-import type { CandidateWorkPlan, CellVerification, DiagnosisDossier, DiagnosisProvider, EvaluationExecutionResult, EvaluationScope, EvaluationStageDecision, EvidenceCell, EvidenceConsumption, ExternalRecovery, PendingSearchOperation, ResearchArchive, ResearchFinding, SearchProgress, SearchProvider, SearchSettings, SearchStageFailure, Snapshot, StageEvaluationPlan, StageResult, TaskUniverse, WorkplanReceipt } from './types.js'
+import type { AutomaticEvaluationRepair, PendingSearchEvidence, CandidateWorkPlan, CellVerification, DiagnosisDossier, DiagnosisProvider, EvaluationExecutionResult, EvaluationScope, EvaluationStageDecision, EvidenceCell, EvidenceConsumption, ExternalRecovery, PendingSearchOperation, ResearchArchive, ResearchFinding, SearchProgress, SearchProvider, SearchSettings, SearchStageFailure, Snapshot, StageEvaluationPlan, StageResult, TaskUniverse, WorkplanReceipt } from './types.js'
 
 import type { CommitIntent, SearchRoundOutcome } from './engine.js'
 
@@ -198,8 +199,137 @@ export class SearchExecutionRuntime {
     return repair ? this.store.object<StageResult>(repair.ref) : original
   }
 
+  private automaticRepairName(originalRef: string): string { return `automatic-repair-${originalRef.slice(7)}` }
+
+  async ownsAutomaticRepair(roundId: string, repair: { id: string; originalRef?: string; automatic?: boolean }): Promise<boolean> {
+    if (!repair.automatic || !repair.originalRef) return false
+    const saved = await this.store.read<AutomaticEvaluationRepair>(`rounds/${roundId}/${this.automaticRepairName(repair.originalRef)}`)
+    return saved?.originalRef === repair.originalRef && saved.attempts.some(a => a.id === repair.id)
+  }
+
+  /** Record stable original references before any evidence can enter a frozen decision. */
+  async pendingEvidence(roundId: string, universe: TaskUniverse, plan: StageEvaluationPlan, snapshot: Snapshot, result: StageResult,
+    settings: SearchSettings, reasons: string[], state: PendingSearchEvidence['state'] = 'infrastructure-incomplete', attempts: AutomaticEvaluationRepair['attempts'] = []): Promise<void> {
+    const original = await this.store.read<{ ref: string }>(`rounds/${roundId}/evaluation-${digestJson([plan.digest, snapshot.digest]).slice(7)}`)
+    invariant(original, 'pending evidence must reference a frozen original evaluation')
+    const refs: string[] = []
+    for (const candidateId of plan.participantIds) {
+      const pointer = await this.store.read<{ ref: string }>(`rounds/${roundId}/binding-${digestJson([plan.digest, candidateId]).slice(7)}`)
+      if (!pointer) continue
+      const binding = await this.store.object<{ sealedSnapshotDigest: string; digest: string }>(pointer.ref)
+      const evaluation = await this.store.read<{ ref: string }>(`rounds/${roundId}/evaluation-${digestJson([plan.digest, binding.sealedSnapshotDigest]).slice(7)}`)
+      if (evaluation) refs.push(evaluation.ref)
+    }
+    const previous = await this.store.read<PendingSearchEvidence | null>(`rounds/${roundId}/pending-evidence`)
+    const participant = { candidateId: snapshot.candidateId, originalRef: original.ref, currentRef: result.digest,
+      missingSlots: missingEvaluationSlots(universe, plan, snapshot, result, settings, this.provider), attempts: structuredClone(attempts) }
+    const participants = [...(previous?.planDigest === plan.digest ? previous.participants ?? [] : []).filter(p => p.originalRef !== original.ref), participant]
+    const pending: PendingSearchEvidence = { planDigest: plan.digest, resultRefs: refs, state, reasonCodes: reasons, participants }
+    validateSearchSchema('PendingSearchEvidence', pending)
+    await this.store.write(`rounds/${roundId}/pending-evidence`, pending)
+  }
+
+  private async resolveEvidence(roundId: string, originalRef: string): Promise<void> {
+    const pending = await this.store.read<PendingSearchEvidence | null>(`rounds/${roundId}/pending-evidence`)
+    if (!pending?.participants?.some(p => p.originalRef === originalRef)) return
+    const participants = pending.participants.filter(p => p.originalRef !== originalRef)
+    await this.store.write(`rounds/${roundId}/pending-evidence`, participants.length ? { ...pending, participants } : null)
+  }
+
+  /** Every engine evaluation crosses this boundary before consumption or a decision freeze. */
+  async ensureEvaluationComplete(admission: SearchAdmission, universe: TaskUniverse, plan: StageEvaluationPlan, snapshot: Snapshot,
+    result: StageResult, signal: AbortSignal, inspectionSignal: AbortSignal): Promise<StageResult> {
+    const { roundId, settings } = admission
+    const original = await this.store.read<{ ref: string }>(`rounds/${roundId}/evaluation-${digestJson([plan.digest, snapshot.digest]).slice(7)}`)
+    invariant(original, 'automatic repair requires original evidence')
+    const name = `rounds/${roundId}/${this.automaticRepairName(original.ref)}`
+    let repair = await this.store.read<AutomaticEvaluationRepair>(name)
+    if (repair) {
+      validateSearchSchema('AutomaticEvaluationRepair', repair)
+      invariant(repair.originalRef === original.ref, 'automatic repair origin changed')
+      // Recover the journal update after publishing a repair result, without
+      // allocating another attempt or extending its backoff.
+      for (const attempt of repair.attempts.filter(a => a.state !== 'complete')) {
+        const saved = await this.store.read<{ ref: string }>(`rounds/${roundId}/repair-result-${digestJson(attempt.id).slice(7)}`)
+        if (saved) { attempt.state = 'complete'; attempt.resultRef = saved.ref; await this.store.write(name, repair) }
+      }
+    }
+    while (true) {
+      inspectionSignal.throwIfAborted()
+      const running = repair?.attempts.find(a => a.state === 'running')
+      if (running) {
+        await this.pendingEvidence(roundId, universe, plan, snapshot, result, settings, ['automatic-repair-pending'], 'repairing', repair!.attempts)
+        result = await this.repairEvaluation(roundId, running.id, original.ref, inspectionSignal, true)
+        running.state = 'complete'; running.resultRef = result.digest
+        await this.store.write(name, repair)
+        await this.evaluationProgress(roundId, universe, plan, snapshot, evaluationProcessMode(plan, settings), result)
+      }
+      const before = missingEvaluationSlots(universe, plan, snapshot, result, settings, this.provider)
+      if (!before.length && !result.failure) {
+        const scheduled = repair?.attempts.find(a => a.state === 'scheduled')
+        if (scheduled) { scheduled.state = 'complete'; scheduled.resultRef = result.digest; await this.store.write(name, repair) }
+        await this.resolveEvidence(roundId, original.ref); return result
+      }
+      invariant(!await this.store.read(`rounds/${roundId}/${this.consumptionKey(plan.digest, snapshot.digest)}`), 'stage already consumed; append an archive evidence completion instead')
+      // Cached original-artifact completions need neither a new execution nor
+      // an automatic attempt, including when this provider lacks a projector.
+      const cached = await reusableCells(this.store, this.provider, plannedCells(universe, plan, snapshot), result.cells)
+      if (cached.length) {
+        const completed = completeEvidence(result, cached)
+        const { digest: ignored, ...body } = completed
+        result = result.failure && missingEvaluationSlots(universe, plan, snapshot, completed, settings, this.provider).length
+          ? seal({ ...body, failure: result.failure }) : completed
+        await this.store.put(result)
+        await this.store.write(`rounds/${roundId}/repair-${original.ref.slice(7)}`, { ref: result.digest })
+        await this.evaluationProgress(roundId, universe, plan, snapshot, evaluationProcessMode(plan, settings), result)
+      }
+      const gaps = missingEvaluationSlots(universe, plan, snapshot, result, settings, this.provider)
+      if (!gaps.length && !result.failure) {
+        const scheduled = repair?.attempts.find(a => a.state === 'scheduled')
+        if (scheduled) { scheduled.state = 'complete'; scheduled.resultRef = result.digest; await this.store.write(name, repair) }
+        await this.resolveEvidence(roundId, original.ref); return result
+      }
+      repair ??= { originalRef: original.ref, policy: evaluationRepairPolicy(settings), attempts: [] }
+      const active = repair.attempts.find(a => a.state !== 'complete')
+      // An owned running attempt must be reconciled even after the deadline;
+      // complete immutable outputs can still be read without starting work.
+      const reasons = result.failure?.kind === 'budget-exhausted' ? [`budget-exhausted:${result.failure.code}`]
+        : gaps.some(g => g.repair === 'unsupported') && !gaps.some(g => g.repair === 'execution' || g.repair === 'projection') ? ['unsupported-evidence-projection']
+        : repair.attempts.length >= repair.policy.maxAttempts ? ['automatic-repair-exhausted']
+        : signal.aborted && signal.reason instanceof SearchBudgetExceeded ? ['budget-exhausted:time'] : []
+      if (!active && reasons.length) {
+        await this.pendingEvidence(roundId, universe, plan, snapshot, result, settings, reasons, 'infrastructure-incomplete', repair.attempts)
+        throw new SearchEvidencePending(plan.digest)
+      }
+      let attempt = active
+      if (!attempt) {
+        const number = repair.attempts.length + 1, scheduledAt = Date.now()
+        attempt = { id: `auto-${original.ref.slice(7)}-${number}`, number, scheduledAt,
+          notBefore: scheduledAt + repairDelay(repair.policy, original.ref, number), state: 'scheduled' }
+        repair.attempts.push(attempt)
+        await this.store.write(name, repair)
+      }
+      await this.pendingEvidence(roundId, universe, plan, snapshot, result, settings, ['automatic-repair-pending'], 'repairing', repair.attempts)
+      if (attempt.state === 'scheduled') {
+        try { await waitForRepair(attempt.notBefore, signal) }
+        catch (error) {
+          inspectionSignal.throwIfAborted()
+          if (!signal.aborted || !(signal.reason instanceof SearchBudgetExceeded)) throw error
+          await this.pendingEvidence(roundId, universe, plan, snapshot, result, settings, ['budget-exhausted:time'], 'infrastructure-incomplete', repair.attempts)
+          throw new SearchEvidencePending(plan.digest)
+        }
+        attempt.state = 'running'; await this.store.write(name, repair)
+        await this.pendingEvidence(roundId, universe, plan, snapshot, result, settings, ['automatic-repair-pending'], 'repairing', repair.attempts)
+      }
+      result = await this.repairEvaluation(roundId, attempt.id, original.ref, inspectionSignal, true)
+      attempt.state = 'complete'; attempt.resultRef = result.digest
+      await this.store.write(name, repair)
+      await this.evaluationProgress(roundId, universe, plan, snapshot, evaluationProcessMode(plan, settings), result)
+    }
+  }
+
   /** Repairs this nonterminal round's unconsumed original stage result under its existing budget. */
-  async repairEvaluation(roundId: string, repairId: string, originalRef: string, signal: AbortSignal): Promise<StageResult> {
+  async repairEvaluation(roundId: string, repairId: string, originalRef: string, signal: AbortSignal, automatic = false): Promise<StageResult> {
     safeId(roundId); safeId(repairId); signal.throwIfAborted()
     invariant(!await this.store.read(`rounds/${roundId}/commit`), 'cannot repair after commit intent')
     invariant(!await this.store.read(`rounds/${roundId}/terminal`), 'cannot repair a terminal round')
@@ -212,8 +342,6 @@ export class SearchExecutionRuntime {
     const original = await this.store.object<StageResult>(originalRef), plan = await this.store.object<StageEvaluationPlan>(original.stagePlanDigest)
     const snapshot = await this.store.object<Snapshot>(original.snapshotDigest)
     await this.hooks.verifySnapshot(snapshot)
-    const consumer = plan.stage === 'held-out' ? undefined : plan.stage === 'baseline-probe' ? 'planning' : plan.stage === 'local' ? 'local' : plan.stage === 'bridge' ? 'nomination' : 'research'
-    invariant(!consumer || !await this.store.read(`rounds/${roundId}/${consumer}`), 'stage already consumed; append an archive evidence completion instead')
     const universe = plan.partition === 'seed' ? admission.seed : admission.heldOut
     invariant(!await this.store.read(`rounds/${roundId}/${this.consumptionKey(plan.digest, snapshot.digest)}`), 'stage already consumed; append an archive evidence completion instead')
     const evaluation = await this.store.read<{ ref: string }>(`rounds/${roundId}/evaluation-${digestJson([plan.digest, snapshot.digest]).slice(7)}`)
@@ -238,7 +366,7 @@ export class SearchExecutionRuntime {
     invariant(!pending || [key, ...[...input.current.cells, ...input.cached, ...previousCells].map(c => digestJson([key, c.digest]))].includes(pending.operationKey), 'another external operation is unresolved; resume its original repair ID')
     // Persist ownership before external execution, including the crash window
     // before an uncertain response can produce a pending-operation marker.
-    await this.store.write(`rounds/${roundId}/active-repair`, { id: repairId })
+    await this.store.write(`rounds/${roundId}/active-repair`, { id: repairId, originalRef, ...(automatic ? { automatic: true } : {}) })
     return this.store.freeze(roundId, `repair-result-${repairKey}`, async () => {
       const budgetStart = (await this.store.read<{ startedAt: number }>('budget'))?.startedAt ?? admission.startedAt
       const deadline = Math.min(admission.startedAt + admission.settings.budgets.round.timeoutMs, budgetStart + admission.settings.budgets.evolution.timeoutMs)
@@ -275,11 +403,12 @@ export class SearchExecutionRuntime {
       await resolvePendingOperation(this.store, roundId, key)
       const cells = [...input.cached, ...output.cells]
       let failure = output.failure
-      const processMode = ['held-out', 'global-seed', 'bridge'].includes(plan.stage) ? admission.settings.promotion.process.mode : admission.settings.search.process.mode
-      const applicableProcess = new Set(processTasks(universe, processMode))
       const projectionSource = completeEvidence(current, cells)
-      for (const cell of projectionSource.cells.filter(c => validOutcome(c) && applicableProcess.has(c.identity.taskId) && c.process?.status !== 'available')) {
-        if (!this.provider.completeProcess) continue
+      const gaps = missingEvaluationSlots(universe, plan, snapshot, projectionSource, currentUniverses.resolvedSettings, this.provider)
+      for (const cell of projectionSource.cells.filter(c => validOutcome(c) && gaps.some(g => g.repair === 'projection' && cellKey(g.identity) === cellKey(c.identity)))) {
+        const complete = this.provider.completeEvidence?.bind(this.provider) ?? this.provider.completeProcess?.bind(this.provider)
+        const inspect = this.provider.completeEvidence ? this.provider.inspectEvidence?.bind(this.provider) : this.provider.inspectProcess?.bind(this.provider)
+        if (!complete) continue
         const projectionKey = digestJson([key, cell.digest])
         const previousProjection = !!await this.store.operation(roundId, projectionKey)
         let projection
@@ -291,8 +420,8 @@ export class SearchExecutionRuntime {
           const recovered = await recoverExternal({ store: this.store, roundId,
             operation: { operationKey: projectionKey, kind: 'evaluation', partition: plan.partition, stagePlanDigest: plan.digest, candidateId: snapshot.candidateId },
             signal, inspectionSignal, previouslyReserved: previousProjection,
-            run: async () => ({ cells: [await this.provider.completeProcess!(cell, projectionKey, signal)] }),
-            ...(this.provider.inspectProcess ? { inspect: (signal: AbortSignal) => this.provider.inspectProcess!(cell, projectionKey, signal) } : {}),
+            run: async () => ({ cells: [await complete(cell, projectionKey, signal)] }),
+            ...(inspect ? { inspect: (signal: AbortSignal) => inspect(cell, projectionKey, signal) } : {}),
             failed: (failure, cells): EvaluationExecutionResult => ({ cells, failure }),
           })
           projected = recovered.value
@@ -312,7 +441,7 @@ export class SearchExecutionRuntime {
       profile(universe, plan, snapshot, result, 'auto'); await this.store.put(result)
       const valid = result.cells.filter(validOutcome)
       invariant(await verifyCells(this.provider, valid.map(cell => ({ cell, identity: cell.identity }))), 'repair provenance rejected')
-      for (const cell of valid) { await this.store.put(cell); await this.store.write(`cells/${cellKey(cell.identity).slice(7)}`, { ref: cell.digest }) }
+      for (const cell of valid) { if (cell.rawMetrics) await this.store.put(cell.rawMetrics); await this.store.put(cell); await this.store.write(`cells/${cellKey(cell.identity).slice(7)}`, { ref: cell.digest }) }
       await this.store.write(`rounds/${roundId}/repair-${original.digest.slice(7)}`, { ref: result.digest })
       return result
       } finally { timed.dispose() }
