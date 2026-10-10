@@ -18,6 +18,8 @@ describe('air-gapped sandbox policy', () => {
     })
     expect(config.network.allowedDomains).toEqual([])
     expect(config.network.deniedDomains).toEqual(['*'])
+    expect(config.network.tlsTerminate).toBeUndefined()
+    expect(config.network.mitmProxy).toBeUndefined()
     expect(config.network.allowLocalBinding).toBe(false)
     expect(config.network.allowAllUnixSockets).toBe(process.platform === 'linux')
     expect(config.filesystem.denyRead).toEqual(['/'])
@@ -102,25 +104,31 @@ describe('air-gapped sandbox policy', () => {
     }
   })
 
-  it.skipIf(cannotRunSandbox)('fails closed when another component mutates the process-global policy', async () => {
-    const mode = process.platform === 'linux' ? 'bubblewrap-only' : 'seccomp'
-    const lease = await acquireAirGappedSandbox(mode, 'policy drift probe')
-    const original = SandboxManager.getConfig()
-    if (original === undefined) throw new Error('sandbox manager has no active config')
-    const expected = await createAirGappedSandboxConfig({
-      linuxIsolation: mode,
-      allowRead: ['/usr'],
-      allowWrite: [],
-    })
-    try {
-      SandboxManager.updateConfig({
-        ...original,
-        network: { ...original.network, allowAllUnixSockets: original.network.allowAllUnixSockets !== true },
+  it.skipIf(cannotRunSandbox).each(['allowAllUnixSockets', 'tlsTerminate', 'mitmProxy'] as const)(
+    'fails closed when another component mutates the process-global %s policy', async field => {
+      const mode = process.platform === 'linux' ? 'bubblewrap-only' : 'seccomp'
+      const lease = await acquireAirGappedSandbox(mode, 'policy drift probe')
+      const original = SandboxManager.getConfig()
+      if (original === undefined) throw new Error('sandbox manager has no active config')
+      const expected = await createAirGappedSandboxConfig({
+        linuxIsolation: mode,
+        allowRead: ['/usr'],
+        allowWrite: [],
       })
-      expect(() => assertAirGappedSandboxActive(expected)).toThrow(/process-global air-gapped/iu)
-    } finally {
-      SandboxManager.updateConfig(original)
-      await lease.release()
-    }
-  })
+      try {
+        const network = { ...original.network }
+        if (field === 'allowAllUnixSockets') network.allowAllUnixSockets = original.network.allowAllUnixSockets !== true
+        else if (field === 'tlsTerminate') network.tlsTerminate = {}
+        else network.mitmProxy = { socketPath: '/tmp/gear-test-mitm.sock', domains: ['example.com'] }
+        SandboxManager.updateConfig({
+          ...original,
+          network,
+        })
+        expect(() => assertAirGappedSandboxActive(expected)).toThrow(/process-global air-gapped/iu)
+      } finally {
+        SandboxManager.updateConfig(original)
+        await lease.release()
+      }
+    },
+  )
 })
