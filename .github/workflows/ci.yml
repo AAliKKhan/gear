@@ -79,7 +79,7 @@ jobs:
       - name: Test the published project API from an external package
         run: node scripts/check-public-api-package.mjs
       - name: Test the installed npm and Python project journey
-        run: node scripts/check-project-package.mjs
+        run: sudo env "PATH=$PATH" "GEAR_PYTHON=$GEAR_PYTHON" "GEAR_SETUP_PYTHON=$GEAR_PYTHON" node scripts/check-project-package.mjs
 
   training-cpu:
     name: Training / CPU
