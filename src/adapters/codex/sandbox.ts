@@ -93,7 +93,17 @@ export async function prepareSandbox(job: CodexJob, runtime: Awaited<ReturnType<
       ...(codeModeHost ? [codeModeHost] : []),
       ...experience.readPaths,
     ]
-    const allowRead = [...runtimePaths, root]
+    // Listing the parent as read-only can cover its writable children when
+    // bubblewrap restores mounts beneath a denied directory. Grant each input
+    // and working directory explicitly so Linux keeps candidate/output writable.
+    const allowRead = [
+      ...runtimePaths,
+      join(root, 'input.json'),
+      join(root, 'schema.json'),
+      candidate,
+      output,
+      home,
+    ]
     for (const protectedPath of [
       ...context.protectedPaths,
       context.directory,
@@ -106,7 +116,12 @@ export async function prepareSandbox(job: CodexJob, runtime: Awaited<ReturnType<
     }
     const policy = await createAirGappedSandboxConfig({
       allowRead,
-      allowWrite: [output, home, ...(request.operation.kind === 'generate_candidate' ? [candidate] : [])],
+      allowWrite: [
+        output,
+        home,
+        ...experience.writePaths,
+        ...(request.operation.kind === 'generate_candidate' ? [candidate] : []),
+      ],
     })
     policy.network = {
       allowedDomains: config.allowedDomains,

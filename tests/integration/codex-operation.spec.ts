@@ -38,7 +38,8 @@ async function fixture(mode = 'success', adapter: 'pi' | 'dsh' = 'pi', prepare =
   const executable = join(root, 'fake-codex.mjs')
   const fakePython =
     process.platform === 'darwin'
-      ? (await promisify(execFile)('/usr/bin/xcrun', ['--find', 'python3'])).stdout.trim()
+      // Xcode-selected Python may live under /Applications, outside the sandbox.
+      ? '/Library/Developer/CommandLineTools/usr/bin/python3'
       : '/usr/bin/python3'
   await writeFile(
     executable,
@@ -107,7 +108,9 @@ if view['operation']['kind']=='diagnose_seed':
  try:
   Path(${JSON.stringify(adapter === 'pi' ? 'AGENTS.md' : 'prompts/system.md')}).write_text('unauthorized diagnosis edit')
   raise AssertionError('diagnosis could edit candidate')
- except PermissionError: pass
+ except OSError as error:
+  import errno
+  assert error.errno in (errno.EACCES,errno.EPERM,errno.EROFS),error
 if view['operation']['kind']=='generate_candidate': Path(${JSON.stringify(adapter === 'pi' ? 'AGENTS.md' : 'prompts/system.md')}).write_text('Use the requested output format.')
 if ${JSON.stringify(mode)}=='protected': Path('package.json').write_text('{}')
 if ${JSON.stringify(mode)}=='invalid': output.write_text('not json')
@@ -133,6 +136,7 @@ if ${JSON.stringify(mode)}=='partialfailed':
     targetAdapter: adapter,
     targets,
     directory,
+    experiencePython: resolvePythonExecutable(),
     protectedPaths: [privateRoot],
     tasks: [{ id: 'seed', instruction: 'Produce the requested answer.', family: 'format' }],
   }
@@ -178,6 +182,13 @@ if ${JSON.stringify(mode)}=='partialfailed':
   }
 }
 const signal = () => new AbortController().signal
+async function modelProcessIds(directory: string): Promise<number[]> {
+  // Linux PID namespaces report a different PID inside the sandbox. Observe
+  // the uniquely named fixture from the host, where cancellation is asserted.
+  const executable = resolve(directory, '../../..', 'fake-codex.mjs')
+  const { stdout } = await promisify(execFile)('/bin/ps', ['-A', '-o', 'pid=', '-o', 'args='])
+  return stdout.split('\n').filter(line => line.includes(executable)).map(line => Number(line.trim().split(/\s+/u)[0]))
+}
 async function untilStarted(directory: string) {
   for (let index = 0; index < 120; index++) {
     try {
@@ -307,10 +318,9 @@ describe('formal Codex operation runner', () => {
     const { provider, request, directory } = await fixture('hold')
     const waiting = provider.submit(request, signal())
     await untilStarted(directory)
-    const event = JSON.parse((await readFile(join(directory, 'events.jsonl'), 'utf8')).split('\n')[0]!) as { pid: number }
     await provider.cancel(request)
     expect((await provider.inspect(request, signal())).state).toBe('complete')
-    expect(() => process.kill(event.pid, 0)).toThrow()
+    await expect.poll(() => modelProcessIds(directory), { timeout: 5000 }).toEqual([])
     const receipt = await waiting
     expect(receipt.result.status).toBe('failed')
     expect(receipt.result.data).toEqual({ error: 'codex-cancelled' })
@@ -378,7 +388,7 @@ describe('formal Codex operation runner', () => {
     expect(await provider.inspect(request, signal())).toEqual({ state: 'unknown' })
     await expect(provider.cancel(request)).rejects.toThrow('codex-cancellation-unconfirmed')
     await expect(provider.submit(request, signal())).rejects.toThrow('codex-result-unknown')
-    expect(() => process.kill(event.pid, 0)).toThrow()
+    await expect.poll(() => modelProcessIds(directory), { timeout: 5000 }).toEqual([])
     expect(
       await readFile(join(event.cwd, 'AGENTS.md')).then(
         () => true,
@@ -394,13 +404,12 @@ it('stops an owned Codex process through the admission snapshot after the model 
   const { provider, request, directory, profile } = await fixture('hold')
   const waiting = provider.submit(request, signal())
   await untilStarted(directory)
-  const event = JSON.parse((await readFile(join(directory, 'events.jsonl'), 'utf8')).split('\n')[0]!) as { pid: number }
   await rm(profile.configuration.executable)
   const cancel = await configuredCancellation(provider.cancellation)
   await cancel.cancel(request)
   const receipt = await waiting
   expect(receipt.result.data).toEqual({ error: 'codex-cancelled' })
-  expect(() => process.kill(event.pid, 0)).toThrow()
+  await expect.poll(() => modelProcessIds(directory), { timeout: 5000 }).toEqual([])
   expect((await provider.inspect(request, signal())).state).toBe('complete')
 }, 30_000)
 
@@ -410,7 +419,6 @@ it(`does not confirm cancellation or replay when the ${lost} state disappears`, 
   const waiting = provider.submit(request, signal()).catch(error => error)
   await untilStarted(directory)
   const worker = JSON.parse(await readFile(join(directory, 'started.json'), 'utf8')) as { pid: number }
-  const event = JSON.parse((await readFile(join(directory, 'events.jsonl'), 'utf8')).split('\n')[0]!) as { pid: number }
   const path = lost === 'job' ? join(directory, 'job.json') : lost === 'operation' ? directory : lost === 'journal' ? join(context.directory, 'operations.json') : context.directory
   const backup = `${context.directory}-lost-${lost}`
   process.kill(worker.pid, 'SIGSTOP')
@@ -418,7 +426,7 @@ it(`does not confirm cancellation or replay when the ${lost} state disappears`, 
   try {
     const cancel = await configuredCancellation(provider.cancellation)
     await expect(cancel.cancel(request)).rejects.toThrow()
-    expect(() => process.kill(event.pid, 0)).not.toThrow()
+    expect(await modelProcessIds(directory)).not.toEqual([])
     expect(await provider.inspect(request, signal())).toEqual({ state: 'unknown' })
     await expect(provider.submit(request, signal())).rejects.toThrow()
   } finally {
@@ -428,7 +436,7 @@ it(`does not confirm cancellation or replay when the ${lost} state disappears`, 
     await provider.cancel(request)
     await waiting
   }
-  expect(() => process.kill(event.pid, 0)).toThrow()
+  await expect.poll(() => modelProcessIds(directory), { timeout: 5000 }).toEqual([])
 }, 30_000)
 
 it('keeps describe read-only and never initializes missing operation state on reconnect', async () => {
@@ -450,18 +458,17 @@ it('requires a stopped receipt even if started.json disappears, then confirms ac
   const waiting = provider.submit(request, signal()).catch(error => error)
   await untilStarted(directory)
   const worker = JSON.parse(await readFile(join(directory, 'started.json'), 'utf8')) as { pid: number }
-  const event = JSON.parse((await readFile(join(directory, 'events.jsonl'), 'utf8')).split('\n')[0]!) as { pid: number }
   process.kill(worker.pid, 'SIGSTOP')
   try {
     await rm(join(directory, 'started.json'))
     await expect(provider.cancel(request)).rejects.toThrow('codex-cancellation-unconfirmed')
-    expect(() => process.kill(event.pid, 0)).not.toThrow()
+    expect(await modelProcessIds(directory)).not.toEqual([])
   } finally {
     process.kill(worker.pid, 'SIGCONT')
     await provider.cancel(request)
     await waiting
   }
-  expect(() => process.kill(event.pid, 0)).toThrow()
+  await expect.poll(() => modelProcessIds(directory), { timeout: 5000 }).toEqual([])
   expect((await provider.inspect(request, signal())).state).toBe('complete')
 }, 30_000)
 it('does not restart a killed worker even if its started marker is also lost', async () => {

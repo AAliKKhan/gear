@@ -150,7 +150,17 @@ or hardware tests.
 Follow the [documentation authoring guide](docs/guide/README.md). Update both
 READMEs or both language versions of a guide when a shared user-facing behavior
 changes. Keep current setup instructions separate from design proposals and
-dated experiment records. For diagram changes, commit only the SVG assets in
+experiment results. Do not commit experiment documents to Git: this includes
+ad hoc experiment plans, progress diaries, run logs, local acceptance reports,
+and one-off validation summaries, even when written as Markdown under `docs/`.
+Keep them outside the checkout or in an ignored local directory; summarize
+relevant results in the PR description and link external artifacts when needed.
+Commit maintained user/developer documentation, durable design decisions,
+reusable test instructions, and small automated fixtures with clear provenance.
+Do not copy a local experiment report into the documentation tree as a substitute
+for updating those maintained documents.
+
+For diagram changes, commit only the SVG assets in
 `docs/guide/assets/` and inspect their rendering and animation in a browser.
 Keep diagram authoring projects and rendered video files outside version control.
 

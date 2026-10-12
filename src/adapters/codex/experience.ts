@@ -14,6 +14,7 @@ export async function stageExperience(job: CodexJob, root: string) {
   const { context, request } = job.input
   const empty = {
     readPaths: [] as string[],
+    writePaths: [] as string[],
     protectedPaths: [] as string[],
     sockets: [] as string[],
     async dispose() {},
@@ -59,11 +60,12 @@ export async function stageExperience(job: CodexJob, root: string) {
       )
     : undefined
   return {
-    readPaths: python.readPaths,
+    readPaths: [...python.readPaths, directory, ...(gateway?.readPaths ?? [])],
+    writePaths: gateway?.writePaths ?? [],
     protectedPaths: context.artifactReader
       ? [(context.artifactReader.configuration as { root: string }).root]
       : [],
-    sockets: gateway ? [gateway.socket] : [],
+    sockets: gateway?.sockets ?? [],
     dispose: () => gateway?.dispose() ?? Promise.resolve(),
     input: {
       ...request.experience,

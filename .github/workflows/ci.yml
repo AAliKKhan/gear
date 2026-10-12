@@ -50,7 +50,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Python RPC dependencies
-        run: python -m pip install './python[dev]' -c python/constraints-test.txt
+        run: |
+          python -m pip install './python[dev]' -c python/constraints-test.txt
+          echo "GEAR_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+          echo "GEAR_TRAINING_TEST_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
       - name: Install sandbox dependencies
         if: needs.changes.outputs.full_tests == 'true'
         run: |
@@ -70,7 +73,7 @@ jobs:
       # Architecture changes on dev and main both run the complete regression suite.
       - name: Test as the production service user
         if: needs.changes.outputs.full_tests == 'true'
-        run: sudo env "PATH=$PATH" npm test -- --maxWorkers=4
+        run: sudo env "PATH=$PATH" "GEAR_PYTHON=$GEAR_PYTHON" "GEAR_TRAINING_TEST_PYTHON=$GEAR_TRAINING_TEST_PYTHON" npm test -- --maxWorkers=4
       # The build above already ran the same command as the prepack hook.
       - run: npm pack --dry-run --ignore-scripts
       - name: Test the published project API from an external package
@@ -124,7 +127,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y bubblewrap ripgrep socat
       - run: npm ci
       - name: Test as the production service user
-        run: sudo env "PATH=$PATH" npm run test:sandbox:platform
+        run: sudo env "PATH=$PATH" "GEAR_PYTHON=$(command -v python)" "GEAR_TRAINING_TEST_PYTHON=$(command -v python)" npm run test:sandbox:platform
 
   sandbox-macos:
     name: Sandbox / macOS
@@ -142,4 +145,4 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: npm run test:sandbox:platform
+      - run: GEAR_PYTHON="$(command -v python)" GEAR_TRAINING_TEST_PYTHON="$(command -v python)" npm run test:sandbox:platform

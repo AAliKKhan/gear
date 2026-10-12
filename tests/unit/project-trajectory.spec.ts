@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
@@ -16,6 +17,27 @@ import { resolvePythonExecutable } from '../../src/adapters/python/interpreter.j
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 const signal = () => new AbortController().signal
+async function requestGateway(path: string, method: string, params: unknown, timeout = 1000) {
+  const config = JSON.parse(await readFile(path, 'utf8')) as { socket?: string; requests: string; responses: string }
+  if (config.socket) return requestRefineSkill(config.socket, { method, params })
+  const id = randomUUID().replaceAll('-', ''), name = id + '.json'
+  await writeFile(join(config.requests, name + '.tmp'), JSON.stringify({ id, method, params }))
+  await rename(join(config.requests, name + '.tmp'), join(config.requests, name))
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    let raw: string
+    try { raw = await readFile(join(config.responses, name), 'utf8') }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      await new Promise(resolve => setTimeout(resolve, 10)); continue
+    }
+    const response = JSON.parse(raw) as { id: string; result?: unknown; error?: { code: string } }
+    expect(response.id).toBe(id)
+    if (response.error) throw new Error(response.error.code)
+    return response.result
+  }
+  throw new Error('gateway did not respond')
+}
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'gear-trajectory-')); roots.push(root)
   const executable = join(root, 'hitch.mjs'), run = 'run_' + 'a'.repeat(32)
@@ -77,11 +99,14 @@ it('offers only the authorized read capability through a per-operation gateway a
   const gateway = await trajectoryGateway(gatewayRoot, root, snapshot, reader.descriptor, resolvePythonExecutable())
   try {
     const { token } = JSON.parse(await readFile(gateway.path, 'utf8')) as { token: string }
-    await expect(requestRefineSkill(gateway.socket, { method: 'run.report', params: { token } })).rejects.toThrow()
-    await expect(requestRefineSkill(gateway.socket, { method: 'trajectory.read', params: { ...params, token: 'wrong' } })).rejects.toThrow()
-    expect(await requestRefineSkill(gateway.socket, { method: 'trajectory.read', params: { ...params, token } })).toMatchObject({ total: 2 })
+    await expect(requestGateway(gateway.path, 'run.report', { token })).rejects.toThrow()
+    await expect(requestGateway(gateway.path, 'trajectory.read', { ...params, token: 'wrong' })).rejects.toThrow()
+    expect(await requestGateway(gateway.path, 'trajectory.read', { ...params, token })).toMatchObject({ total: 2 })
   } finally { await gateway.dispose() }
-  await expect(readFile(gateway.socket)).rejects.toThrow()
+  const calls = await readFile(join(root, 'calls.jsonl'), 'utf8')
+  const { token } = JSON.parse(await readFile(gateway.path, 'utf8')) as { token: string }
+  await expect(requestGateway(gateway.path, 'trajectory.read', { ...params, token }, 150)).rejects.toThrow()
+  expect(await readFile(join(root, 'calls.jsonl'), 'utf8')).toBe(calls)
 })
 
 it('aborts in-flight provider reads when its Meta gateway is disposed', async () => {
@@ -90,7 +115,7 @@ it('aborts in-flight provider reads when its Meta gateway is disposed', async ()
   await mkdir(join(gatewayRoot, 'experience')); await writeFile(join(root, 'mode'), 'hang')
   const gateway = await trajectoryGateway(gatewayRoot, root, snapshot, reader.descriptor, resolvePythonExecutable())
   const { token } = JSON.parse(await readFile(gateway.path, 'utf8')) as { token: string }
-  const pending = requestRefineSkill(gateway.socket, { method: 'trajectory.read', params: { ...params, token } })
+  const pending = requestGateway(gateway.path, 'trajectory.read', { ...params, token })
   const rejected = expect(pending).rejects.toThrow()
   try {
     for (let attempt = 0; attempt < 100; attempt++) {

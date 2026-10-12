@@ -13,7 +13,7 @@ it('executes frozen Python decisions with OS filesystem, environment and network
   const source = join(root, 'source'), scratch = join(root, 'scratch'), secret = join(root, 'held-out.json')
   await mkdir(scratch); await writeFile(secret, 'PRIVATE_HELD_OUT')
   const plugin = join(root, 'isolation.py')
-  await writeFile(plugin, `from gear.algorithms import Decision,Operation\nimport os,socket\nclass Probe:\n def step(self,view,state):\n  assert 'GEAR_PRIVATE_TEST' not in os.environ\n  try:\n   open(${JSON.stringify(secret)}).read()\n   raise AssertionError('private file readable')\n  except PermissionError: pass\n  try:\n   socket.create_connection(('1.1.1.1',443),timeout=0.2)\n   raise AssertionError('network accessible')\n  except OSError: pass\n  return Decision(state,(Operation('stop'),),'sandbox verified')\n`)
+  await writeFile(plugin, `from gear.algorithms import Decision,Operation\nimport os,socket\nclass Probe:\n def step(self,view,state):\n  assert 'GEAR_PRIVATE_TEST' not in os.environ\n  try:\n   open(${JSON.stringify(secret)}).read()\n   raise AssertionError('private file readable')\n  except (PermissionError,FileNotFoundError): pass\n  try:\n   socket.create_connection(('1.1.1.1',443),timeout=0.2)\n   raise AssertionError('network accessible')\n  except OSError: pass\n  return Decision(state,(Operation('stop'),),'sandbox verified')\n`)
   const identity = await freezeAlgorithmSource(source, [{ path: 'isolation.py', source: plugin }])
   const worker = new PythonAlgorithmWorker({ python: process.env.GEAR_TRAINING_TEST_PYTHON ?? 'python3', sourceRoot: source, scratch, implementationIdentity: identity })
   process.env.GEAR_PRIVATE_TEST = 'not-for-worker'
