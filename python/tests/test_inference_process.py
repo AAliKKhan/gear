@@ -14,11 +14,11 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from gear_training.content import ContentStore, atomic_json, digest_bytes, digest_json
-from gear_training.node import NodeService
-from gear_training.node_runtime import observe_runtime
-from gear_training.recovery import owned_alive
-from gear_training.inference_process import ProcessService, run_engine
+from gear.training.storage.content import ContentStore, atomic_json, digest_bytes, digest_json
+from gear.training.runtime.node import NodeService
+from gear.training.runtime.node_runtime import observe_runtime
+from gear.training.runtime.recovery import owned_alive
+from gear.training.inference.inference_process import ProcessService, run_engine
 
 
 SERVER = '''
@@ -101,7 +101,7 @@ class InferenceProcessTests(unittest.TestCase):
         self.sequence += 1
         envelope = {"schemaVersion": 2, "requestId": "request-" + str(self.sequence), "node": self.node.identity,
                     "operation": "inference." + action, "inputDigest": digest_json(payload), "payload": payload}
-        completed = subprocess.run([sys.executable, "-m", "gear_training.node", "rpc", "--config", str(self.config_path)],
+        completed = subprocess.run([sys.executable, "-m", "gear.training.cli.node", "rpc", "--config", str(self.config_path)],
             input=json.dumps(envelope), text=True, capture_output=True, timeout=20, env=self.env)
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         return None if discard else json.loads(completed.stdout)["result"]
@@ -168,7 +168,7 @@ class InferenceProcessTests(unittest.TestCase):
         stopped = self.call("stop", self.owner)
         self.assertTrue(stopped["resourcesReleased"])
         directory = Path(self.config["nodeRoot"]) / "inference" / self.payload["serviceId"]
-        late = subprocess.run([sys.executable, "-m", "gear_training.inference_process", "_supervisor", "--directory", str(directory)], env=self.env, capture_output=True, timeout=10)
+        late = subprocess.run([sys.executable, "-m", "gear.training.cli.inference", "_supervisor", "--directory", str(directory)], env=self.env, capture_output=True, timeout=10)
         self.assertEqual(late.returncode, 0, late.stderr)
         self.assertEqual(self.call("inspect", self.owner)["state"], "stopped")
 
@@ -215,22 +215,22 @@ class InferenceProcessTests(unittest.TestCase):
 
     def test_stop_during_runtime_observation_prevents_late_engine_spawn(self):
         service = ProcessService(self.config, self.node.identity)
-        with patch("gear_training.inference_process.observe_runtime", return_value=self.actual), \
-                patch("gear_training.inference_process.subprocess.Popen"): service.start(self.payload)
+        with patch("gear.training.inference.inference_process.observe_runtime", return_value=self.actual), \
+                patch("gear.training.inference.inference_process.subprocess.Popen"): service.start(self.payload)
         directory = service.directory(self.owner)
         actual = observe_runtime()
         def observed():
             self.assertTrue(service.stop(self.owner)["resourcesReleased"])
             return actual
-        with patch("gear_training.inference_process.observe_runtime", side_effect=observed), \
-                patch("gear_training.inference_process.subprocess.Popen") as launch:
+        with patch("gear.training.inference.inference_process.observe_runtime", side_effect=observed), \
+                patch("gear.training.inference.inference_process.subprocess.Popen") as launch:
             run_engine(service, directory, self.payload)
         launch.assert_not_called()
 
     def test_stop_during_spawn_includes_child_in_owned_process_snapshot(self):
         service = ProcessService(self.config, self.node.identity)
-        with patch("gear_training.inference_process.observe_runtime", return_value=self.actual), \
-                patch("gear_training.inference_process.subprocess.Popen"): service.start(self.payload)
+        with patch("gear.training.inference.inference_process.observe_runtime", return_value=self.actual), \
+                patch("gear.training.inference.inference_process.subprocess.Popen"): service.start(self.payload)
         directory = service.directory(self.owner)
         fence_entered = threading.Event(); stopped = []; threads = []; children = []
         original_fence, original_popen = service._fence, subprocess.Popen
@@ -245,8 +245,8 @@ class InferenceProcessTests(unittest.TestCase):
             return child
         try:
             with patch.object(service, "_fence", side_effect=fence), \
-                    patch("gear_training.inference_process.observe_runtime", return_value=self.actual), \
-                    patch("gear_training.inference_process.subprocess.Popen", side_effect=spawn):
+                    patch("gear.training.inference.inference_process.observe_runtime", return_value=self.actual), \
+                    patch("gear.training.inference.inference_process.subprocess.Popen", side_effect=spawn):
                 run_engine(service, directory, self.payload)
             for thread in threads: thread.join(12); self.assertFalse(thread.is_alive())
             self.assertEqual(len(stopped), 1); self.assertTrue(stopped[0]["resourcesReleased"])

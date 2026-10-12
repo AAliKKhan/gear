@@ -13,7 +13,7 @@ it('admits the TB 2.1 Python example through the real v2 schema and CAS', async 
   try {
     const store = new ModelTrainingStore(root), base = v2spec(await fixture(store))
     const script = `import json, pathlib, runpy, sys, tempfile
-from gear_training.content import ContentStore
+from gear.training.storage.content import ContentStore
 inputs = json.load(sys.stdin)
 example = runpy.run_path(inputs['example'])
 splits = {'train': ['one'], 'dev': ['two'], 'heldOut': ['three']}

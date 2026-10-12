@@ -1,5 +1,7 @@
 # 用自己的 GPU 运行四阶段训练
 
+包结构和旧入口的迁移说明见 [训练包目录](package-layout.zh-CN.md)。
+
 这份文档面向接手训练流程的开发者。你可以直接复用 Terminal-Bench（TB）GRPO / SFT 示例，也可以替换其中一个或多个阶段。训练逻辑用 Python 编写；控制器负责把脚本放到指定节点运行、跟踪状态和恢复，不要求你为四个阶段写 TypeScript 实现。
 
 推荐阅读顺序：四阶段 → 修改方式 → GPU 一次性配置 → 选一个示例启动。
@@ -39,8 +41,8 @@ TaskSource 和 DatasetBuilder 都是普通 Python 对象。agent 只是内部可
 一个脚本只需提供工厂，返回组合好的 `TrainingLoop`。例如现成的 TB GRPO 工厂位于 [tb21.py](../../examples/training-loop/terminal-bench-2.1/recipe/tb21.py)：
 
 ```python
-from gear_training import TrainingLoop
-from gear_training.online_rl import (
+from gear.training import TrainingLoop
+from gear.training.pipelines.online_rl import (
     FrozenTaskSource, HitchRolloutExecutor,
     PolicyDatasetBuilder, SlimeModelUpdater,
 )
@@ -117,7 +119,7 @@ class SuccessDatasetBuilder:
 然后统一启动：
 
 ```sh
-python -m gear_training run my-spec.json --config controller.json
+python -m gear.training run my-spec.json --config controller.json
 ```
 
 对于不使用 Hitch / Slime 的普通四阶段脚本，使用 `kind="training-script"` 和轻量脚本控制器即可，配置样例见 [普通脚本入口](development.zh-CN.md#通过控制器运行自己的脚本)。它们都使用同一工厂接口。
@@ -295,15 +297,15 @@ python examples/training-loop/terminal-bench-2.1/prepare.py \
 控制器启动时输出 `EXP_ID` / `RUN_ID`，记录这两个 ID：
 
 ```sh
-python -m gear_training status EXP_ID RUN_ID --config local-training/controller.json
-python -m gear_training pause EXP_ID RUN_ID --config local-training/controller.json
-python -m gear_training resume EXP_ID RUN_ID --config local-training/controller.json
+python -m gear.training status EXP_ID RUN_ID --config local-training/controller.json
+python -m gear.training pause EXP_ID RUN_ID --config local-training/controller.json
+python -m gear.training resume EXP_ID RUN_ID --config local-training/controller.json
 ```
 
 `resume` 会持续跟踪原运行。不要重新执行带新 output 的准备命令来恢复，否则会创建新实验。仅数据准备或校验失败、尚未创建实验时，可修复环境后运行已生成的 spec：
 
 ```sh
-python -m gear_training run runs/tb-grpo-001/spec.json --config local-training/controller.json
+python -m gear.training run runs/tb-grpo-001/spec.json --config local-training/controller.json
 # SFT 对应 runs/tb-sft-001/spec.json
 ```
 

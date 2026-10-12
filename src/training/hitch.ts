@@ -58,7 +58,7 @@ export class HitchModelEvaluator implements ModelEvaluator {
   private call(args: string[], timeout = 60_000): Promise<unknown> { return jsonProcess(this.options.command, ['--root', this.options.root, ...args], undefined, timeout) }
   private async materialize(ref: ContentRef, kind: string): Promise<string> {
     const destination = join(this.options.workspace, kind, ref.digest.slice(7))
-    await jsonProcess(this.options.python, ['-m', 'gear_training.artifacts', 'materialize', '--store-root', this.store.root], { ref, destination }, 3_600_000)
+    await jsonProcess(this.options.python, ['-m', 'gear.training.cli.artifacts', 'materialize', '--store-root', this.store.root], { ref, destination }, 3_600_000)
     return kind === 'datasets' ? datasetDestination(await this.store.readJson(ref), destination) : destination
   }
   private async prepareNode(request: ModelEvaluationRequest): Promise<string | undefined> {

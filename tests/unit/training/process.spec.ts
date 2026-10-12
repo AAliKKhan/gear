@@ -48,7 +48,7 @@ describe('packaged training subprocess boundary', () => {
     const configPath = join(root, 'job-config.json')
     await writeFile(configPath, JSON.stringify({ schemaVersion: 1, storeRoot: root, jobsRoot: join(root, 'jobs'), hitchRoot: join(root, 'hitch'),
       hitchPath: root, slimePath: root, megatronPath: root, hitchCommand: [join(root, 'not-installed')], gatewayBindHost: '127.0.0.1', gatewayAdvertisedHost: '127.0.0.1', episodeTimeoutSeconds: 60 }))
-    const trainer = new SlimeModelTrainer({ python: ['env', `PYTHONPATH=${resolve('python')}`, 'python3'], configPath })
+    const trainer = new SlimeModelTrainer({ python: ['env', `PYTHONPATH=${resolve('python')}`, process.env.GEAR_TRAINING_TEST_PYTHON ?? 'python3'], configPath })
     const caps = await trainer.preflight(run.request)
     expect(caps.blockers).toContain('gpu-probes-pending')
     expect(caps.exactPolicyTokens).toBe(false)

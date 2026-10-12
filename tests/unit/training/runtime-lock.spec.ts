@@ -43,7 +43,7 @@ describe('versioned process training runtime lock', () => {
     expect(trainingCompatibilityDigest(previous)).not.toBe(trainingCompatibilityDigest(run.request))
     const python = process.env.GEAR_TRAINING_TEST_PYTHON ?? 'python3'
     const actual = await jsonProcess(['env', `PYTHONPATH=${resolve('python')}`, python], ['-c',
-      'import json,sys\nfrom gear_training.preflight import compatibility_digest\nprint(json.dumps(compatibility_digest(json.load(sys.stdin))))'], run.request)
+      'import json,sys\nfrom gear.training.runtime.preflight import compatibility_digest\nprint(json.dumps(compatibility_digest(json.load(sys.stdin))))'], run.request)
     expect(actual).toBe(trainingCompatibilityDigest(run.request))
   })
   it('records an uncertified process revision without allowing it to become a certified lock', async () => {

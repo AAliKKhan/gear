@@ -168,11 +168,11 @@ describe('model-node trainer and controller episode lifecycle', () => {
   })
   it('agrees with the Python v2 checkpoint identity and resolves a single physical GPU for colocated execution', async () => {
     const s = await setup()
-    const actual = await jsonProcess(['env', `PYTHONPATH=${resolve('python')}`, 'python3'], ['-c', `
+    const actual = await jsonProcess(['env', `PYTHONPATH=${resolve('python')}`, process.env.GEAR_TRAINING_TEST_PYTHON ?? 'python3'], ['-c', `
 import json, sys
-from gear_training.preflight import compatibility_digest
-from gear_training.execution import training_devices
-from gear_training.placement import resource_plan, placement_probe_digest
+from gear.training.runtime.preflight import compatibility_digest
+from gear.training.runtime.execution import training_devices
+from gear.training.runtime.placement import resource_plan, placement_probe_digest
 request = json.load(sys.stdin)
 placement, counts, _ = resource_plan(request, [])
 original = placement_probe_digest(request)

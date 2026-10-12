@@ -47,7 +47,7 @@ export async function preflightDeployment(input: TrainingControllerConfigV2, inv
     const results = await Promise.allSettled([
       observeHitchController(input.hitch, invoke),
       invoke(input.hitch.command, ['--root', input.hitch.root, 'capabilities', '--json']),
-      invoke(input.hitch.python, ['-c', 'import json,platform\nfrom gear_training.preflight import bridge_digest\nprint(json.dumps({"pythonVersion":platform.python_version(),"bridgeDigest":bridge_digest()}))']),
+      invoke(input.hitch.python, ['-c', 'import json,platform\nfrom gear.training.runtime.preflight import bridge_digest\nprint(json.dumps({"pythonVersion":platform.python_version(),"bridgeDigest":bridge_digest()}))']),
     ])
     const [observed, capabilities, bridge] = results
     if (observed.status === 'fulfilled') { observations.controller = observed.value; record('controller', 'hitch', 'controller-runtime', true) }

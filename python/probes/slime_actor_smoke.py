@@ -71,9 +71,9 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
 
 
 def prepared_args(options):
-    from gear_training.driver import build_argv
-    from gear_training.placement import validate_resource_args
-    from gear_training.recipes.agent_grpo import validate_layout
+    from gear.training.backends.slime.driver import build_argv
+    from gear.training.runtime.placement import validate_resource_args
+    from gear.training.recipes.agent_grpo import validate_layout
     from slime.utils.arguments import parse_args
 
     source = json.loads(Path(options.input).read_text())
@@ -171,9 +171,9 @@ def main():
         return
 
     import ray
-    from gear_training.placement import TrainingMemoryCycle
+    from gear.training.runtime.placement import TrainingMemoryCycle
     from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
-    from gear_training.slime_runtime import logging_api
+    from gear.training.backends.slime.slime_runtime import logging_api
     configure_logger, init_tracking, finish_tracking = logging_api()
 
     start = time.monotonic()
@@ -223,7 +223,7 @@ def main():
         # Slime labels this checkpoint with zero-based rollout_id, not step count.
         assert tracker.read_text().strip() == "0", "synchronous checkpoint does not match rollout 0"
         memory.export_hf(str(options.output / "export"))
-        from gear_training.qwen35_export import preserve_frozen_auxiliary
+        from gear.training.backends.slime.qwen35_export import preserve_frozen_auxiliary
         preserve_frozen_auxiliary(options.model, options.output / "export", mtp_num_layers=getattr(args, "mtp_num_layers", 0))
         delta = changed_tensor(options.model, options.output / "export")
         record("exported", changed_tensor=delta)

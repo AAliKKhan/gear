@@ -45,7 +45,7 @@ describe('controller stage worker bridge', () => {
   it('launches the real Python CLI with a custom provider, publishes once and replays without inference', async () => {
     const s = await setup()
     await writeFile(join(s.root, 'stage_runner_fixture.py'), `import json
-from gear_training.agents import AgentResult
+from gear.training.adapters.agents import AgentResult
 class Runner:
     async def run(self, request):
         (request.workspace / 'outputs/manifest.json').write_text(json.dumps({'selectedEpisodeIds': [], 'analysis': 'real custom-provider CLI'}))

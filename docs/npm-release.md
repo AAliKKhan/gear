@@ -54,5 +54,5 @@ node .github/scripts/npm-release.mjs
 npm run typecheck
 npm run build
 npm pack --dry-run --ignore-scripts
-node scripts/check-search-package.mjs
+node scripts/check-public-api-package.mjs
 ```

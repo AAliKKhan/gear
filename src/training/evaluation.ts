@@ -1,3 +1,4 @@
+import { builtinPolicy } from '../adapters/python/builtin-policy.js'
 import { digestJson } from './digest.js'
 import { gpuUuids } from './deployment.js'
 import { parseModelEvaluationEvidence, requireContract } from './schema.js'
@@ -46,34 +47,18 @@ export function pairModelEvidence(beforeInput: ModelEvaluationEvidence, afterInp
   requireContract(digestJson(before.condition) === digestJson(after.condition)
     && before.subject.harnessRef.digest === after.subject.harnessRef.digest, 'unpaired-model-evaluation', 'model comparisons may change weights only; harness and all common conditions must match')
   const originals = new Map(before.trials.map(t => [slotKey(t), t]))
-  const grouped = new Map<string, { before: number[]; after: number[] }>()
-  for (const trial of after.trials) {
-    const baseline = originals.get(slotKey(trial))!
-    const group = grouped.get(trial.taskId) ?? { before: [], after: [] }
-    group.before.push(baseline.reward!); group.after.push(trial.reward!); grouped.set(trial.taskId, group)
-  }
-  const avg = (xs: number[]): number => xs.reduce((sum, v) => sum + v, 0) / xs.length
-  const taskDeltas = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([taskId, group]) => ({
-    taskId, baseline: avg(group.before), candidate: avg(group.after), delta: avg(group.after) - avg(group.before),
-  }))
-  const meanDelta = avg(taskDeltas.map(t => t.delta))
-  const standardError = taskDeltas.length < 2 ? null : Math.sqrt(taskDeltas.reduce((sum, t) => sum + (t.delta - meanDelta) ** 2, 0) / (taskDeltas.length - 1) / taskDeltas.length)
-  return { partition: after.condition.partition, taskDeltas, meanDelta, standardError,
-    inferenceErrorRate: after.trials.filter(t => t.inferenceError).length / after.condition.slots.length }
+  return builtinPolicy<PairedModelReport>('training_pair', {
+    partition: after.condition.partition,
+    pairs: after.trials.map(trial => ({ taskId: trial.taskId,
+      baselineReward: originals.get(slotKey(trial))!.reward!, candidateReward: trial.reward! })),
+    inference_errors: after.trials.filter(trial => trial.inferenceError).length,
+    slot_count: after.condition.slots.length,
+  })
 }
 
 export function devGate(spec: ModelTrainingSpec, dev: PairedModelReport): string[] {
-  const reasons: string[] = []
-  if (dev.meanDelta < spec.evaluation.policy.minDevGain) reasons.push('dev-gain-below-threshold')
-  if (dev.inferenceErrorRate > spec.evaluation.policy.maxInferenceErrorRate) reasons.push('dev-inference-error-rate')
-  for (const task of dev.taskDeltas) if (spec.evaluation.policy.requiredTaskIds.includes(task.taskId) && task.delta < 0) reasons.push(`required-task-regression:${task.taskId}`)
-  return reasons
+  return builtinPolicy<string[]>('training_dev_gate', { policy: spec.evaluation.policy, dev })
 }
 export function decideModel(spec: ModelTrainingSpec, dev: PairedModelReport, heldOut: PairedModelReport): ModelDecision {
-  const reasons = devGate(spec, dev)
-  if (heldOut.meanDelta < -spec.evaluation.policy.maxHeldOutRegression) reasons.push('held-out-regression')
-  if (heldOut.inferenceErrorRate > spec.evaluation.policy.maxInferenceErrorRate) reasons.push('held-out-inference-error-rate')
-  if (heldOut.taskDeltas.some(t => spec.evaluation.policy.requiredTaskIds.includes(t.taskId) && t.delta < 0)) reasons.push('held-out-required-task-regression')
-  return { outcome: reasons.length ? 'rejected' : 'accepted', reasons, dev,
-    heldOut: { meanDelta: heldOut.meanDelta, standardError: heldOut.standardError, taskCount: heldOut.taskDeltas.length, inferenceErrorRate: heldOut.inferenceErrorRate } }
+  return builtinPolicy<ModelDecision>('training_decide', { policy: spec.evaluation.policy, dev, heldOut })
 }

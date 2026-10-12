@@ -46,7 +46,7 @@ Gear、Hitch、任务快照与 canonical/verifier 证据保留在控制端。控
 
 SSH 配置默认使用 `artifactStorage="model-node"`，训练权重和 optimizer/checkpoint 留在远端 CAS。控制端收集有界元数据和持久化回执，并独立核验自己保管的任务/verifier 依赖。Hitch 的 `models add-node SNAPSHOT_REF.json --model-node-file BINDING.json --name NAME` 从该节点校验并注册模型；`models inspect NAME --verify --model-node-file BINDING.json` 在同一节点核验实际文件。普通本机核验仍要求本机权重存在，不会自动下载远端模型。
 
-初始 HF 模型已在节点上时，使用 `gear-refine training seal-hf-node /workspace/models/parent --config CONTROLLER.json`，在节点完成 safetensors/有限数值检查并回传描述。模型节点缺文件、代际漂移或回执不完整均会拒绝完成收集。迁移需复制并核验原制品；节点身份变化后必须重新冻结部署。
+初始 HF 模型已在节点上时，使用 `gear training seal-hf-node /workspace/models/parent --config CONTROLLER.json`，在节点完成 safetensors/有限数值检查并回传描述。模型节点缺文件、代际漂移或回执不完整均会拒绝完成收集。迁移需复制并核验原制品；节点身份变化后必须重新冻结部署。
 
 ## 模型节点
 
@@ -88,7 +88,7 @@ node RPC 注入实际 node identity/generation 与 nodeRoot；不要自行填写
 准备好上述配置并启动 Hitch daemon 后，先执行不需要实验 ID 的检查：
 
 ```sh
-gear-refine training preflight-deployment --config /srv/gear-controller/controller.json
+gear training preflight-deployment --config /srv/gear-controller/controller.json
 ```
 
 返回 `training-deployment-preflight`，每项包含 `scope`、`target`、`code` 与 `passed` / `blocked` / `unverified`。控制端检查 Hitch 源码与 binding/harness 能力、Python bridge；Harbor worker 检查自身 Harbor/Linux Docker 环境与版本、常驻进程身份和模型路由能力；模型节点通过实际 probe 固定 node/generation 后，检查 job 配置、Slime/Megatron checkout 与修改摘要、export 扩展、torch/SGLang/Ray/psutil、CUDA、GPU 清单/计算进程、主机可用内存，以及训练和评估的独立 gateway 端口。节点故障不会取消其他可独立执行的检查，错误正文、凭据和源码路径不进入报告。
@@ -102,7 +102,7 @@ gear-refine training preflight-deployment --config /srv/gear-controller/controll
 先启动控制端 Hitch daemon，确保目标 provider 已注册。然后调用：
 
 ```sh
-gear-refine training freeze-deployment --config /srv/gear-controller/controller.json
+gear training freeze-deployment --config /srv/gear-controller/controller.json
 ```
 
 返回 `deployment` 与 `observation`。将前者放入完整 schemaVersion=2 spec；GPU 资源写成 `{ "nodeId": "实际节点 ID", "gpuUuid": "实际 UUID" }`。后者包含注册能力、daemon/worker 的现场版本观察与模型节点环境观察，不能代替 sandbox 路由或 GPU 数值验收。一个 provider 首版只允许一个注册 worker；heartbeat、当前负载、daemon instance 与本次 nonce 不进入身份摘要，worker generation/碰撞域/平台/backend 和实际环境会进入。远程 worker 的现场观察已接入，但完整远程训练/managed-model capability 尚未公开，远程任务部署仍会在相应能力检查处拒绝冻结。
@@ -163,8 +163,8 @@ daemon 经当前 worker bearer/generation 通道发出短期 challenge，包含�
 SSH 部署默认使用 `artifactStorage="model-node"`。`publish` 和 `rollback` 通过 Hitch 的 `models add-node` 注册并核验冻结节点上的 HF 快照，权重、tokenizer 和 config 文件继续保留在节点 CAS；控制端不下载这些文件。
 
 ```sh
-gear-refine training publish EXP_ID --config /srv/gear-controller/controller.json
-gear-refine training rollback EXP_ID RELEASE_ID --config /srv/gear-controller/controller.json
+gear training publish EXP_ID --config /srv/gear-controller/controller.json
+gear training rollback EXP_ID RELEASE_ID --config /srv/gear-controller/controller.json
 ```
 
 成功后 `activationPath` 原子记录 `hitchModel` 和 `modelNode`。后者是公开的冻结节点绑定，不含 SSH/Python 连接配置或凭据。业务调用方在 episode 开始时读取这两个字段，将 `modelNode` 保存为 binding 文件，并向 Hitch 的 `local plan` / `eval submit` 传入 `--model-node-file BINDING.json`；Hitch 从其私有注册表解析连接。发布只切换后续 episode 使用的版本，已运行的推理服务保持原模型。

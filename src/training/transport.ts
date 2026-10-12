@@ -22,7 +22,7 @@ const quote = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`
 export function nodeCommand(connection: ModelNodeConnection, action: 'rpc' | 'cas-import' | 'cas-export'): string[] {
   requireContract(connection.python.length > 0 && connection.python.every(x => typeof x === 'string' && !!x && !x.includes('\0')),
     'invalid-node-command', 'Python must be an explicit argv array')
-  const command = [...connection.python, '-m', 'gear_training.node', action, '--config', connection.configPath]
+  const command = [...connection.python, '-m', 'gear.training.cli.node', action, '--config', connection.configPath]
   if (connection.transport.type === 'local') return command
   requireContract(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(connection.transport.host), 'invalid-ssh-host', 'SSH host must be a configured Host alias')
   return ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '--', connection.transport.host, command.map(quote).join(' ')]

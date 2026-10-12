@@ -5,11 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gear_training.content import ContractError, atomic_json, digest_json
-from gear_training.device_lease import NodeDeviceLedger
-from gear_training.inference_process import ProcessService
-from gear_training.node import NodeService
-from gear_training.state import load
+from gear.training.storage.content import ContractError, atomic_json, digest_json
+from gear.training.runtime.device_lease import NodeDeviceLedger
+from gear.training.inference.inference_process import ProcessService
+from gear.training.runtime.node import NodeService
+from gear.training.storage.state import load
 
 
 class InferenceGenerationTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class InferenceGenerationTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.config = {"schemaVersion": 2, "nodeId": "model-node", "nodeRoot": str(self.root / "node"),
                        "storeRoot": str(self.root / "content"), "jobConfigPath": str(self.root / "absent.json"), "inferencePort": 30123}
-        with patch("gear_training.node.boot_identity", return_value="os-boot-1"): self.old = NodeService(self.config)
+        with patch("gear.training.runtime.node.boot_identity", return_value="os-boot-1"): self.old = NodeService(self.config)
         self.service_id = "inference_" + "a" * 32
         self.inference_id = digest_json("original-lock")
         self.identity = {"node": self.old.identity, "ownerId": "controller-owner", "inferenceId": self.inference_id, "inputDigest": digest_json("original-start")}
@@ -28,11 +28,11 @@ class InferenceGenerationTests(unittest.TestCase):
         atomic_json(self.directory / "identity.json", self.identity)
         atomic_json(self.directory / "status.json", {"schemaVersion": 2, "state": "ready", "resourcesReleased": False, "handle": self.handle})
         atomic_json(self.directory / "access.json", {"engineToken": "private-old-engine-token"})
-        self.gpu = patch("gear_training.device_lease.gpu_processes", return_value=[]).start(); self.addCleanup(patch.stopall)
+        self.gpu = patch("gear.training.runtime.device_lease.gpu_processes", return_value=[]).start(); self.addCleanup(patch.stopall)
         self.owner = "inference/" + self.service_id
         ledger = NodeDeviceLedger(self.config["nodeRoot"], self.old.identity)
         ledger.acquire(self.owner, ["GPU-1"]); ledger.track(self.owner, [{"pid": 42, "createdAt": 1.5}], launching=True)
-        with patch("gear_training.node.boot_identity", return_value="os-boot-2"): self.node = NodeService(self.config)
+        with patch("gear.training.runtime.node.boot_identity", return_value="os-boot-2"): self.node = NodeService(self.config)
         self.payload = {"serviceId": self.service_id, "ownerId": "controller-owner", "inferenceId": self.inference_id,
                         "previousNode": self.old.identity, "expectedHandle": self.handle}
 
@@ -42,8 +42,8 @@ class InferenceGenerationTests(unittest.TestCase):
                               "operation": "inference.recover", "inputDigest": digest_json(payload), "payload": payload})["result"]
 
     def test_release_is_replayable_preserves_source_and_does_not_interpret_old_pids(self):
-        with patch("gear_training.device_lease.owned_alive", side_effect=AssertionError("old PID inspected")), \
-             patch("gear_training.inference_process.stop_owned", side_effect=AssertionError("old PID signalled")):
+        with patch("gear.training.runtime.device_lease.owned_alive", side_effect=AssertionError("old PID inspected")), \
+             patch("gear.training.inference.inference_process.stop_owned", side_effect=AssertionError("old PID signalled")):
             receipt = self.recover(); self.assertEqual(self.recover(), receipt)
         self.assertTrue(receipt["resourcesReleased"]); self.assertEqual(receipt["state"], "stopped")
         self.assertEqual(receipt["previousNode"], self.old.identity); self.assertEqual(receipt["node"], self.node.identity)
@@ -53,7 +53,7 @@ class InferenceGenerationTests(unittest.TestCase):
         service = ProcessService(self.config, self.node.identity)
         new_payload = {"serviceId": "inference_" + "b" * 32, "ownerId": "controller-owner", "model": {"model_id": digest_json("new-model")},
                        "lock": {"inference_id": digest_json("new-lock"), "execution": {"platform": {"backend": "cuda", "device_constraint": "GPU-1"}}}}
-        with patch.object(service, "prepare"), patch("gear_training.inference_process.subprocess.Popen") as launch:
+        with patch.object(service, "prepare"), patch("gear.training.inference.inference_process.subprocess.Popen") as launch:
             service.start(new_payload); self.assertEqual(launch.call_count, 1)
             with self.assertRaisesRegex(ContractError, "another owner or node generation"):
                 service.start({**new_payload, "serviceId": self.service_id})
