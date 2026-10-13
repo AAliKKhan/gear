@@ -1,5 +1,7 @@
 # 模型训练 · 实验性
 
+公开 Python 入口为 `gear.training`；原 `gear_training` 包已废弃。代码先搬迁，再按职责整理，见[包布局](../../training/package-layout.zh-CN.md)。
+
 Gear 也可在固定 Harness 和数据集的条件下协调 Slime GRPO 模型更新。它使用独立于 Harness 进化的实验生命周期。
 
 ## 已实现内容
@@ -18,7 +20,7 @@ TypeScript controller 与 Python bridge 负责封存输入、保存精确 policy
 6. 检查不可变模型评估结果，再显式发布或回滚。
 
 ```text
-gear-refine training
+gear training
 ```
 
 裸命令用于显示参数校验/用法，不会开始训练。完整子命令参数和 JSON schema 见[训练指南](../../training/README.zh-CN.md)。`advance` 是一次协调步骤，不是后台计时器；Slime job 和 Hitch eval 有各自生命周期。

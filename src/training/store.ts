@@ -1,3 +1,4 @@
+import { publishFile, syncDirectory } from '../adapters/storage/atomic.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { link, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
@@ -13,15 +14,7 @@ export const digestBytes = (bytes: Uint8Array | string): string => `sha256:${cre
 
 /** fsync data, rename, then fsync its directory: no partial manifest is a commit. */
 export async function atomicWrite(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  const temp = `${path}.${randomUUID()}.tmp`
-  const fd = await open(temp, 'wx', 0o600)
-  try { await fd.writeFile(`${stableJson(value)}\n`); await fd.sync() } finally { await fd.close() }
-  try { await rename(temp, path); await syncDirectory(dirname(path)) } finally { await rm(temp, { force: true }) }
-}
-async function syncDirectory(path: string): Promise<void> {
-  const dir = await open(path, 'r')
-  try { await dir.sync() } finally { await dir.close() }
+  await publishFile(path, `${stableJson(value)}\n`)
 }
 
 export class TrainingContentStore {

@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gear_training.content import ContractError, atomic_json, digest_json
-from gear_training.inference_process import ProcessService
-from gear_training.node import NodeService
-from gear_training.state import load
+from gear.training.storage.content import ContractError, atomic_json, digest_json
+from gear.training.inference.inference_process import ProcessService
+from gear.training.runtime.node import NodeService
+from gear.training.storage.state import load
 
 
 class InferenceAttachTests(unittest.TestCase):
@@ -45,12 +45,12 @@ class InferenceAttachTests(unittest.TestCase):
         atomic_json(self.directory / "access.json", self.access)
         self.owner = self.service.owner(self.service_id)
         self.service.devices.acquire(self.owner, []); self.service.devices.track(self.owner, [self.supervisor, self.engine])
-        self.alive = patch("gear_training.device_lease.owned_alive", return_value=True).start()
-        self.runtime = patch("gear_training.inference_attach.observe_runtime", return_value=self.actual).start()
-        self.query = patch("gear_training.inference_attach.urllib.request.urlopen").start()
+        self.alive = patch("gear.training.runtime.device_lease.owned_alive", return_value=True).start()
+        self.runtime = patch("gear.training.inference.inference_attach.observe_runtime", return_value=self.actual).start()
+        self.query = patch("gear.training.inference.inference_attach.urllib.request.urlopen").start()
         self.query.return_value.__enter__.return_value.status = 200
         self.query.return_value.__enter__.return_value.read.return_value = json.dumps({"snapshot": "live"}).encode()
-        self.gpu = patch("gear_training.device_lease.gpu_processes", return_value=[]).start()
+        self.gpu = patch("gear.training.runtime.device_lease.gpu_processes", return_value=[]).start()
         self.addCleanup(patch.stopall)
 
     def rpc(self, payload=None):
@@ -63,7 +63,7 @@ class InferenceAttachTests(unittest.TestCase):
 
     def test_rpc_replay_uses_live_observation_without_mutating_ownership(self):
         before = self.snapshot()
-        with patch("gear_training.inference_process.stop_owned", side_effect=AssertionError("attachment signalled a process")), \
+        with patch("gear.training.inference.inference_process.stop_owned", side_effect=AssertionError("attachment signalled a process")), \
                 patch.object(self.service, "start", side_effect=AssertionError("attachment restarted")):
             result = self.rpc(); self.assertEqual(result["serverInfo"], {"snapshot": "live"})
             self.assertEqual(result["handle"], self.handle); self.assertEqual(result["access"], self.access)

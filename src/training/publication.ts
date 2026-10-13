@@ -39,7 +39,7 @@ export class HitchModelPublisher implements ModelPublisher {
       imported = await call(['models', 'add-node', refFile, '--model-node-file', nodeFile, '--name', model.id.slice(7), '--json']) as typeof imported
       await call(['models', 'inspect', `local/${imported.model_id}`, '--verify', '--model-node-file', nodeFile, '--json'])
     } else {
-      await jsonProcess(this.options.python, ['-m', 'gear_training.artifacts', 'materialize', '--store-root', this.store.root],
+      await jsonProcess(this.options.python, ['-m', 'gear.training.cli.artifacts', 'materialize', '--store-root', this.store.root],
         { ref: model.hfSnapshotRef, destination: directory }, 3_600_000)
       imported = await call(['models', 'add', directory, '--name', model.id.slice(7), '--json']) as typeof imported
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { digestJson } from '../../../src/training/digest.js'
-import { providerEnvironment } from '../../../src/training/provider-environment.js'
+import { providerEnvironment } from '../../../src/adapters/hitch/environment.js'
 
 function fixture() {
   const controller = { schema_version: '2' as const, package_version: '0.2.9', node_version: 'v22.0.0', runtime_id: digestJson('runtime'),

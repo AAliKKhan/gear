@@ -129,7 +129,7 @@ async function runFromCli(coordinator: ModelTrainingCoordinator, experimentId: s
 export async function trainingCommand(argv: string[]): Promise<unknown> {
   const args = [...argv]; const action = args.shift()
   if (action === '--help' || action === 'help') return {
-    usage: 'gear-refine training ACTION --config CONTROLLER.json [arguments]',
+    usage: 'gear training ACTION --config CONTROLLER.json [arguments]',
     actions: ['node-probe DEPLOYMENT.json NODE_REF', 'preflight-deployment', 'freeze-deployment', 'put-json FILE', 'seal-hf DIRECTORY', 'seal-hf-node NODE_DIRECTORY', 'seal-dataset DIRECTORY', 'seal-sft INPUT.json', 'validate SPEC', 'init SPEC', 'admit EXP', 'preflight EXP RUN',
       'seal-script SOURCE_DIRECTORY MODULE:FACTORY', 'run SPEC', 'run SCRIPT_ID', 'run EXP RUN', 'advance EXP RUN', 'status EXP [RUN]', 'pause EXP RUN', 'resume EXP RUN', 'close EXP RUN', 'publish EXP', 'rollback EXP RELEASE'],
   }
@@ -141,7 +141,7 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
     return new ModelNodeTransport(node, null).call('probe', {})
   }
   const index = args.indexOf('--config')
-  requireContract(index >= 0 && !!args[index + 1], 'usage', 'gear-refine training ACTION --config CONTROLLER.json [arguments]')
+  requireContract(index >= 0 && !!args[index + 1], 'usage', 'gear training ACTION --config CONTROLLER.json [arguments]')
   const file = args.splice(index, 2)[1]!
   const rawConfig = JSON.parse(await readFile(file, 'utf8'))
   if (rawConfig.kind === 'training-script-controller') return scriptCommand(action!, args, parseScriptControllerConfig(rawConfig))
@@ -207,11 +207,11 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
       }
     }
     return jsonProcess(config.schemaVersion === 1 ? config.slime.python : config.hitch.python,
-      ['-m', 'gear_training.artifacts', 'seal-sft', '--store-root', store.root], input, 3_600_000)
+      ['-m', 'gear.training.cli.artifacts', 'seal-sft', '--store-root', store.root], input, 3_600_000)
   }
   if (action === 'seal-hf' || action === 'seal-dataset') {
     requireContract(args.length === 1, 'usage', `training ${action} DIRECTORY --config CONTROLLER.json`)
-    return jsonProcess(config.schemaVersion === 1 ? config.slime.python : config.hitch.python, ['-m', 'gear_training.artifacts', action, '--store-root', store.root], { directory: args[0] }, 3_600_000)
+    return jsonProcess(config.schemaVersion === 1 ? config.slime.python : config.hitch.python, ['-m', 'gear.training.cli.artifacts', action, '--store-root', store.root], { directory: args[0] }, 3_600_000)
   }
   if (action === 'run' && args.length === 1) {
     const input = JSON.parse(await readFile(args[0]!, 'utf8'))

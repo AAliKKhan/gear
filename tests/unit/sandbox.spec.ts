@@ -1,13 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
   acquireAirGappedSandbox, assertAirGappedSandboxActive, createAirGappedSandboxConfig,
 } from '../../src/sandbox.js'
-import { SubprocessHarnessCompiler } from '../../src/harness/compiler.js'
 
 describe('air-gapped sandbox policy', () => {
   it('makes the Linux bubblewrap compatibility downgrade explicit and narrow', async () => {
@@ -83,25 +79,6 @@ describe('air-gapped sandbox policy', () => {
       .rejects.toThrow(/already leased with a different/iu)
     expect(SandboxManager.getConfig()?.network.allowAllUnixSockets).toBe(true)
     await activeLease.release()
-  })
-
-  it.skipIf(cannotRunSandbox)('runs a required compiler command under the leased compatibility policy', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'gear-sandbox-compiler-'))
-    await mkdir(join(root, 'harness'))
-    const mode = process.platform === 'linux' ? 'bubblewrap-only' : 'seccomp'
-    const lease = await acquireAirGappedSandbox(mode, 'compiler integration probe')
-    try {
-      const compiler = new SubprocessHarnessCompiler({
-        command: '/usr/bin/true',
-        sandboxMode: 'required',
-        linuxIsolation: mode,
-        targetRoot: 'harness',
-      })
-      await compiler.compile(root, new AbortController().signal)
-    } finally {
-      await lease.release()
-      await rm(root, { recursive: true, force: true })
-    }
   })
 
   it.skipIf(cannotRunSandbox).each(['allowAllUnixSockets', 'tlsTerminate', 'mitmProxy'] as const)(

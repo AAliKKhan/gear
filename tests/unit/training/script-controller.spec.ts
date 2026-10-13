@@ -9,7 +9,7 @@ import type { ModelNodeConnection } from '../../../src/training/types.js'
 import { deployment } from './placement-fixture.js'
 import { trainingCommand } from '../../../src/training/cli.js'
 
-const recipe = `from gear_training import TrainingLoop
+const recipe = `from gear.training import TrainingLoop
 from helper import increment
 class Source:
     async def generate(self, ctx): return [ctx.checkpoint]

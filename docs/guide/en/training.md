@@ -1,5 +1,7 @@
 # Model training · experimental
 
+The public Python entrypoint is `gear.training`; `gear_training` has been removed. Existing implementations were moved and organized by responsibility; see the [package layout](../../training/package-layout.zh-CN.md).
+
 Gear also coordinates Slime GRPO model updates while freezing the Harness and datasets. This is a separate experiment lifecycle from Harness evolution.
 
 ## What is implemented
@@ -18,7 +20,7 @@ The documented hardware certification covers a remote single RTX 5090 with Qwen2
 6. Inspect immutable model evaluation before explicit publication or rollback.
 
 ```text
-gear-refine training
+gear training
 ```
 
 The bare command displays validation/usage information; it does not start training. Full subcommand arguments and JSON schemas are in the [training guide](../../training/README.zh-CN.md). `advance` is one coordination step, not a background timer; Slime jobs and Hitch evaluations have their own lifecycles.
