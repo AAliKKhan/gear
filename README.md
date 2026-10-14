@@ -163,3 +163,5 @@ npm test
 ```
 
 [Contributing](CONTRIBUTING.md) · [Documentation guidelines](docs/guide/README.md) · [GitHub issues](https://github.com/rsi-gear/gear/issues) · [MIT license](LICENSE)
+
+Model evaluation can use [independent inference pools](docs/training/standalone-inference.md) with explicit tensor parallelism, multiple replicas and configurable trial concurrency.

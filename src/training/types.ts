@@ -275,7 +275,8 @@ export interface ModelTrainingSpecV1 {
   evaluation: {
     provider: 'hitch-managed-local'
     topology: 'local-docker-harbor-dataset'
-    samplingProfile: 'baseline'
+    samplingProfile: 'baseline' | 'throughput'
+    inferencePool?: EvaluationInferencePoolV3
     common: { runtimeDigest: string; protocolDigest: string; samplingDigest: string; budgetsDigest: string; attempts: number }
     policy: {
       minDevGain: number
@@ -290,6 +291,18 @@ export interface ModelTrainingSpecV1 {
   publication: { mode: 'explicit' }
 }
 
+/** Explicit ordinary inference deployment; candidate weights are bound separately. */
+export interface EvaluationInferencePoolV3 {
+  schemaVersion: 3
+  profile: 'baseline' | 'throughput'
+  tensorParallelSize: number
+  replicas: { devices: string[] }[]
+  maxRunningRequests: number
+  maxQueuedRequests: number
+  maxConcurrent: number
+  modelNode: { nodeId: string; generation: string; runtimeDigest: string }
+}
+
 export interface NodeIdentity { nodeId: string; generation: string }
 export interface NodeGpu { nodeId: string; gpuUuid: string }
 /** Connection paths and tunnel ports are deployment inputs, never experiment identity. */
@@ -297,6 +310,7 @@ export interface ModelNodeConnection {
   transport: { type: 'local' } | { type: 'ssh'; host: string }
   workspace: string
   python: string[]
+  runtime?: 'standalone-v1' | 'gear-legacy-v2'
   configPath: string
   gateway: { localPort: number; nodePort: number }
 }
@@ -418,6 +432,7 @@ export interface ModelEvaluationCondition {
   dtype: string
   /** Present for v2 experiments; a different execution location needs a new baseline. */
   deploymentDigest?: string
+  inferencePoolDigest?: string
 }
 export interface ModelEvaluationEvidence {
   schemaVersion: 1
@@ -442,6 +457,7 @@ export interface ModelEvaluationRequest {
   datasetTasks: DatasetPartition['tasks']
   verifierRef: ContentRef
   evaluationDevices: string[]
+  inferencePool?: EvaluationInferencePoolV3
   deployment?: FrozenExecutionPlacement
 }
 export interface ModelEvaluator {

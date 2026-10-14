@@ -6,7 +6,7 @@ import { matchesHarnessRef } from './harness.js'
 import { datasetDestination } from './snapshots.js'
 import { modelEvidenceKey, validateModelEvidence } from './evaluation.js'
 import { jsonProcess } from './process.js'
-import { TrainingContractError, requireContract } from './schema.js'
+import { TrainingContractError, requireContract, validateEvaluationPool } from './schema.js'
 import { atomicWrite, TrainingContentStore, withTrainingFileLock } from './store.js'
 import type { ContentRef, ModelEvaluationEvidence, ModelEvaluationRequest, ModelEvaluator, ModelNodeConnection } from './types.js'
 import type { TrainingDeploymentConfig } from './types.js'
@@ -20,7 +20,11 @@ const object = (v: unknown): Json => { requireContract(!!v && typeof v === 'obje
 const array = (v: unknown): unknown[] => { requireContract(Array.isArray(v), 'invalid-hitch-evidence', 'expected an evidence array'); return v }
 const string = (v: unknown): string => { requireContract(typeof v === 'string' && v.length > 0, 'invalid-hitch-evidence', 'expected an evidence identity'); return v }
 export const inferenceCommonDigest = (lock: Json): string => digestJson({ engine: lock.engine, runtime_id: lock.runtime_id,
-  profile: lock.profile, execution: lock.execution, resources: lock.resources, ...(lock.model_node ? { model_node: lock.model_node } : {}) })
+  profile: lock.profile, execution: lock.execution, resources: lock.resources, ...(lock.model_node ? { model_node: lock.model_node } : {}), ...(lock.topology ? { topology: lock.topology } : {}) })
+
+export function hitchInferenceTopology(pool: import('./types.js').EvaluationInferencePoolV3) {
+  return { replicas: pool.replicas, routing: 'least-active', max_running_requests: pool.maxRunningRequests, max_queued_requests: pool.maxQueuedRequests }
+}
 
 export interface HitchModelEvaluatorOptions {
   command: string[]
@@ -33,7 +37,7 @@ export interface HitchModelEvaluatorOptions {
   artifactStorage?: 'controller' | 'model-node'
   deployment?: TrainingDeploymentConfig
   /** Hash this entire object as evaluation.common.budgetsDigest. */
-  budgets: { timeoutSeconds: number; setupTimeoutSeconds: number; maxConcurrent: 1; maxEpisodeSteps: 16; infrastructureRetries: 0; maxRepairRounds: number }
+  budgets: { timeoutSeconds: number; setupTimeoutSeconds: number; maxConcurrent: number; maxEpisodeSteps: 16; infrastructureRetries: 0; maxRepairRounds: number }
 }
 interface EvalJournal { key: string; requestDigest: string; startedAt: number; evalId?: string; inferenceId?: string; modelId?: string; evidence?: ModelEvaluationEvidence;
   submitted?: boolean; repairRounds?: number; repair?: { id: string; pending: boolean }; retainedTrials?: ModelEvaluationEvidence['trials']; serviceUsage?: Record<string, number>; serviceScopes?: string[] }
@@ -43,6 +47,12 @@ export function evaluationModelNode(request: ModelEvaluationRequest): ReturnType
   if (!node) return undefined
   requireContract(node.launcher === 'process', 'unsupported-model-launcher', 'v2 evaluation requires the process model-node launcher')
   requireContract(request.condition.deploymentDigest === digestJson(request.deployment), 'evaluation-deployment-drift', 'evaluation condition must bind its complete frozen placement')
+  if (request.inferencePool) {
+    validateEvaluationPool(request.inferencePool, request.evaluationDevices, request.deployment!)
+    requireContract(request.condition.inferencePoolDigest === digestJson(request.inferencePool), 'evaluation-pool-drift', 'condition must freeze the complete inference pool')
+    return hitchModelNodeBinding({ ...node, ...request.inferencePool.modelNode })
+  }
+  requireContract(!request.condition.inferencePoolDigest, 'evaluation-pool-missing', 'frozen pool configuration is missing')
   return hitchModelNodeBinding(node)
 }
 
@@ -50,10 +60,10 @@ export function evaluationModelNode(request: ModelEvaluationRequest): ReturnType
 export class HitchModelEvaluator implements ModelEvaluator {
   constructor(readonly store: TrainingContentStore, readonly options: HitchModelEvaluatorOptions) {
     const b = options.budgets
-    requireContract(b.maxConcurrent === 1 && b.maxEpisodeSteps === 16 && b.infrastructureRetries === 0
+    requireContract(Number.isSafeInteger(b.maxConcurrent) && b.maxConcurrent >= 1 && b.maxConcurrent <= 1024 && b.maxEpisodeSteps === 16 && b.infrastructureRetries === 0
       && Number.isSafeInteger(b.timeoutSeconds) && b.timeoutSeconds > 0 && Number.isSafeInteger(b.setupTimeoutSeconds) && b.setupTimeoutSeconds > 0
       && Number.isSafeInteger(b.maxRepairRounds) && b.maxRepairRounds >= 0 && b.maxRepairRounds <= 32,
-    'invalid-evaluation-budgets', 'v1 evaluation requires fixed positive timeouts, one concurrent trial, 16 steps and no hidden retries')
+    'invalid-evaluation-budgets', 'v1 evaluation requires fixed positive timeouts, bounded concurrent trials, 16 steps and no hidden retries')
   }
   private call(args: string[], timeout = 60_000): Promise<unknown> { return jsonProcess(this.options.command, ['--root', this.options.root, ...args], undefined, timeout) }
   private async materialize(ref: ContentRef, kind: string): Promise<string> {
@@ -63,6 +73,8 @@ export class HitchModelEvaluator implements ModelEvaluator {
   }
   private async prepareNode(request: ModelEvaluationRequest): Promise<string | undefined> {
     const binding = evaluationModelNode(request)
+    requireContract(!request.inferencePool || request.inferencePool.maxConcurrent === this.options.budgets.maxConcurrent,
+      'evaluation-concurrency-drift', 'task concurrency must match the frozen inference pool')
     if (!binding) { requireContract(!this.options.modelNode, 'evaluation-deployment-drift', 'v1 evaluator cannot silently select a model node'); return undefined }
     requireContract(this.options.modelNode, 'managed-node-not-configured', 'v2 evaluation requires a private model-node connection')
     if (this.options.deployment) await verifyExecutionPlacement(request.deployment!, this.options.deployment, this.options)
@@ -73,7 +85,10 @@ export class HitchModelEvaluator implements ModelEvaluator {
     if (request.deployment!.taskExecution.placement === 'remote') requireContract(capabilities.remote_managed_model_node === '2',
       'remote-model-capability-missing', 'remote Harbor requires a versioned managed-node model route')
     const directory = join(this.options.workspace, 'model-nodes', digestJson(binding).slice(7))
-    return registerHitchModelNode(this.options, binding, directory)
+    if (request.inferencePool) requireContract(capabilities.standalone_inference === '1' && capabilities.inference_pool === '3',
+      'inference-pool-capability-missing', 'Hitch must support standalone inference pool v3')
+    return registerHitchModelNode({ ...this.options, modelNode: { ...this.options.modelNode,
+      runtime: request.inferencePool ? 'standalone-v1' : this.options.modelNode.runtime ?? 'gear-legacy-v2' } }, binding, directory)
   }
   private async services(request: ModelEvaluationRequest, journal: EvalJournal, stop: boolean): Promise<{ resourcesReleased: boolean; gpuSeconds: number }> {
     const binding = evaluationModelNode(request)
@@ -192,8 +207,8 @@ export class HitchModelEvaluator implements ModelEvaluator {
     })
   }
   private async evaluatePass(request: ModelEvaluationRequest, idempotencyKey: string, control?: OrderedEvaluationControl): Promise<ModelEvaluationEvidence> {
-    requireContract(request.harnessAdapter === 'training-tool' && request.evaluationDevices.length === 1,
-      'unsupported-evaluation-topology', 'v1 evaluator requires training-tool and one pinned evaluation GPU')
+    requireContract(request.harnessAdapter === 'training-tool' && (request.inferencePool ? request.evaluationDevices.length > 0 : request.evaluationDevices.length === 1),
+      'unsupported-evaluation-topology', 'evaluation requires training-tool and an explicit GPU pool; legacy evaluation retains one GPU')
     requireContract(digestJson(this.options.budgets) === request.condition.budgetsDigest, 'evaluation-budget-drift', 'evaluation budgets differ from the frozen condition')
     const key = modelEvidenceKey({ subject: request.subject, condition: request.condition })
     const journalPath = join(this.options.workspace, 'evaluations', digestJson(idempotencyKey).slice(7), 'state.json')
@@ -249,8 +264,11 @@ export class HitchModelEvaluator implements ModelEvaluator {
         && imported.template_digest === request.model.chatTemplateDigest && imported.quantization === null,
       'hitch-import-drift', 'Hitch import differs from the sealed HF export')
       journal.modelId = string(imported.model_id)
+      const pool = request.inferencePool
+      const poolFile = join(this.options.workspace, 'evaluations', digestJson(idempotencyKey).slice(7), 'inference-pool.json')
+      if (pool) await atomicWrite(poolFile, hitchInferenceTopology(pool))
       const planned = object(await this.call(['local', 'plan', `local/${journal.modelId}`, '--harness', harnessRef,
-        '--gpu', request.evaluationDevices[0]!, ...nodeArgs, '--offline', '--json'], 3_600_000))
+        '--gpu', pool?.replicas[0]?.devices[0] ?? request.evaluationDevices[0]!, ...(pool ? ['--pool-file', poolFile, '--profile', pool.profile] : []), ...nodeArgs, '--offline', '--json'], 3_600_000))
       const lock = object(planned.lock)
       this.validateLock(lock, journal.modelId, request)
       journal.inferenceId = string(lock.inference_id)
@@ -263,7 +281,7 @@ export class HitchModelEvaluator implements ModelEvaluator {
     if (control ? !journal.submitted : !journal.evalId) {
       const accepted = object(await this.call(['eval', 'submit', '--dataset', dataset, '--harness', harnessRef, '--model', `local/${journal.modelId}`,
         '--inference', journal.inferenceId, ...nodeArgs, '--offline',
-        '--attempts', String(Math.max(...request.condition.slots.map(s => s.attempt))), '--max-concurrent', '1', '--infrastructure-retries', '0',
+        '--attempts', String(Math.max(...request.condition.slots.map(s => s.attempt))), '--max-concurrent', String(this.options.budgets.maxConcurrent), '--infrastructure-retries', '0',
         '--provider', request.deployment?.taskExecution.provider ?? 'local-docker', '--model-capture', 'proxy', '--require-model-capture',
         '--timeout', `${this.options.budgets.timeoutSeconds}s`, '--setup-timeout', `${this.options.budgets.setupTimeoutSeconds}s`,
         ...(control ? ['--control-file', control.file] : ['--idempotency-key', idempotencyKey])]))
@@ -281,7 +299,7 @@ export class HitchModelEvaluator implements ModelEvaluator {
     const actualRequest = object(inspection.request)
     requireContract(actualRequest.model === `local/${journal.modelId}` && actualRequest.harness_ref === harnessRef
       && actualRequest.dataset === dataset && actualRequest.timeout_ms === this.options.budgets.timeoutSeconds * 1000
-      && actualRequest.max_concurrent === 1 && actualRequest.infrastructure_retries === 0,
+      && actualRequest.max_concurrent === this.options.budgets.maxConcurrent && actualRequest.infrastructure_retries === 0,
     'hitch-evaluation-request-drift', 'Hitch changed the frozen evaluation request')
     const result = object(inspection.result)
     if (inspection.plan == null && result.status === 'failed' && result.failure_stage === 'preparing') {
@@ -340,12 +358,13 @@ export class HitchModelEvaluator implements ModelEvaluator {
   }
   private validateLock(lock: Json, modelId: string, request: ModelEvaluationRequest): void {
     const node = evaluationModelNode(request)
-    requireContract(node ? lock.schema_version === '2' && digestJson(lock.model_node) === digestJson(node) : !lock.model_node,
+    requireContract(node ? lock.schema_version === (request.inferencePool ? '3' : '2') && digestJson(lock.model_node) === digestJson(node) : !lock.model_node,
       'inference-node-drift', 'inference lock differs from the selected model-node identity')
     const c = request.condition; const execution = object(lock.execution); const platform = object(execution.platform)
-    requireContract(lock.model_id === modelId && lock.profile === 'baseline' && inferenceCommonDigest(lock) === c.runtimeDigest
+    requireContract(lock.model_id === modelId && lock.profile === (request.inferencePool?.profile ?? 'baseline') && inferenceCommonDigest(lock) === c.runtimeDigest
       && digestJson(lock.protocol) === c.protocolDigest && digestJson(lock.generation) === c.samplingDigest
-      && platform.backend === 'cuda' && platform.device_constraint === request.evaluationDevices[0]
+      && platform.backend === 'cuda' && platform.device_constraint === (request.inferencePool?.replicas[0]?.devices[0] ?? request.evaluationDevices[0])
+      && (!request.inferencePool || digestJson(lock.topology) === digestJson(hitchInferenceTopology(request.inferencePool)))
       && object(lock.protocol).api === 'chat-completions' && object(lock.generation).max_output_tokens === 2048,
     'inference-common-condition-drift', 'actual Hitch inference lock differs from the frozen common condition')
   }

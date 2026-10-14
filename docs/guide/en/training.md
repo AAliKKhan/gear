@@ -42,3 +42,5 @@ GEAR_TRAINING_TEST_PYTHON="$VIRTUAL_ENV/bin/python" npm run test:training
 ```
 
 On macOS, omit `--index-url` when installing Torch. CI runs the Python suite in `Training / CPU`.
+
+Independent model-evaluation inference supports explicit TP and replica pools with configurable trial concurrency. See [standalone inference setup and identities](../../training/standalone-inference.md). Training rollout behavior is unchanged.

@@ -49,7 +49,21 @@ def worker_alive(worker):
 def device_ledger(config):
     if not config.get("node"):
         return None
-    from gear.training.runtime.device_lease import NodeDeviceLedger
+    adapter = config.get("deviceLeaseRuntime", "gear-legacy-v2")
+    require(
+        adapter in ("standalone-v1", "gear-legacy-v2"),
+        "invalid-device-lease-runtime",
+        "unknown device lease runtime",
+    )
+    if adapter == "standalone-v1":
+        try:
+            from hitch_inference.device_lease import NodeDeviceLedger
+        except ImportError as error:
+            raise RuntimeError(
+                "standalone-v1 device ownership requires the installed hitch-inference package"
+            ) from error
+    else:
+        from gear.training.runtime.device_lease import NodeDeviceLedger
 
     return NodeDeviceLedger(config["nodeRoot"], config["node"])
 

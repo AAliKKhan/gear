@@ -45,6 +45,18 @@ describe('v2 independent execution placement', () => {
     expect(digestJson(parseModelTrainingSpec(legacy))).toBe(before)
     expect(parseModelTrainingSpec(legacy)).not.toHaveProperty('deployment')
   })
+  it('validates explicit runtime adapters and rejects malformed node connections', () => {
+    const config = deployment()
+    for (const runtime of ['standalone-v1', 'gear-legacy-v2'] as const) {
+      config.nodes[config.modelRuntime.nodeRef]!.runtime = runtime
+      expect(parseTrainingDeployment(config).nodes[config.modelRuntime.nodeRef]!.runtime).toBe(runtime)
+    }
+    const nodes = config.nodes as Record<string, unknown>
+    nodes[config.modelRuntime.nodeRef] = null
+    expect(() => parseTrainingDeployment(config)).toThrow('must be an object')
+    nodes[config.modelRuntime.nodeRef] = { ...deployment().nodes[config.modelRuntime.nodeRef], runtime: 'unknown' }
+    expect(() => parseTrainingDeployment(config)).toThrow('supported adapter')
+  })
   it('freezes deployment through admission and rejects persisted drift', async () => {
     const spec = v2spec(legacy)
     const coordinator = new ModelTrainingCoordinator(store, new FixtureTrainer(store), new FixtureEvaluator(store))

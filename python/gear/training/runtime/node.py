@@ -278,7 +278,16 @@ class NodeService:
                     "node-store-drift",
                     "job and transport must use the same node CAS",
                 )
-                config = {**config, "node": self.identity, "nodeRoot": str(self.root)}
+                config = {
+                    **config,
+                    "node": self.identity,
+                    "nodeRoot": str(self.root),
+                    **(
+                        {"deviceLeaseRuntime": self.config["deviceLeaseRuntime"]}
+                        if "deviceLeaseRuntime" in self.config
+                        else {}
+                    ),
+                }
                 service = JobService(config)
                 action = operation.removeprefix("training.")
                 if action.startswith("stages."):

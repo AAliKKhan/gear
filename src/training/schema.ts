@@ -74,9 +74,12 @@ const budgets = object({ totalGpuSeconds: nonnegative, maxRolloutTokens: positiv
 const agentStage = object({ runner: str, options: (value, path) => { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(path, 'runner options object'); digestJson(value) },
   instructionsRef: ref, maxRepairs: integer, timeoutSeconds: positive })
 const stages = object({ taskSource: optional(agentStage), datasetBuilder: optional(agentStage) })
+const inferencePool = object({ schemaVersion: literal(3), profile: literal('baseline', 'throughput'), tensorParallelSize: positive,
+  replicas: array(object({ devices: array(pattern(/^GPU-[A-Za-z0-9-]+$/), 1) }), 1), maxRunningRequests: positive,
+  maxQueuedRequests: integer, maxConcurrent: positive, modelNode: object({ nodeId: str, generation: str, runtimeDigest: hash }) })
 const spec = object({ schemaVersion: version, kind: literal('model-training'), name: str, fixedHarness: harness,
   initialModel: ref, referenceModel: ref, stages: optional(stages), datasets: object({ train: partition, dev: partition, heldOut: partition }), verifier: ref, trainer, rollout, offlineTraining: optional(offlineTraining),
-  evaluation: object({ provider: literal('hitch-managed-local'), topology: literal('local-docker-harbor-dataset'), samplingProfile: literal('baseline'),
+  evaluation: object({ provider: literal('hitch-managed-local'), topology: literal('local-docker-harbor-dataset'), samplingProfile: literal('baseline', 'throughput'), inferencePool: optional(inferencePool),
     common: object({ runtimeDigest: hash, protocolDigest: hash, samplingDigest: hash, budgetsDigest: hash, attempts: positive }),
     policy: object({ minDevGain: nonnegative, maxHeldOutRegression: nonnegative, maxInferenceErrorRate: nonnegative, requiredTaskIds: array(str), maxHeldOutEvaluations: positive }) }),
   resources: object({ trainingDevices: array(str, 1), evaluationDevices: array(str, 1), mode: literal('isolated', 'sequential') }), budgets,
@@ -100,7 +103,7 @@ const artifacts = object({ schemaVersion: version, handle, model, checkpointRef:
 const subject = object({ harnessRef: ref, modelVersionRef: ref, weightsDigest: hash })
 const condition = object({ schemaVersion: version, partition: literal('dev', 'held-out'), datasetDigest: hash,
   slots: array(object({ taskId: str, attempt: positive, environmentDigest: hash }), 1), verifierDigest: hash, budgetsDigest: hash,
-  samplingDigest: hash, runtimeDigest: hash, protocolDigest: hash, tokenizerDigest: hash, chatTemplateDigest: hash, architecture: str, dtype: str, deploymentDigest: optional(hash) })
+  samplingDigest: hash, runtimeDigest: hash, protocolDigest: hash, tokenizerDigest: hash, chatTemplateDigest: hash, architecture: str, dtype: str, deploymentDigest: optional(hash), inferencePoolDigest: optional(hash) })
 const evidence = object({ schemaVersion: version, evalId: str, subject, condition, evidenceKey: hash, hitchModelId: hash, inferenceLockRef: ref,
   trials: array(object({ taskId: str, attempt: positive, runId: str, valid: bool, reward: optional(num), inferenceError: bool })), complete: bool, gpuSeconds: nonnegative })
 
@@ -211,10 +214,18 @@ export function parseModelTrainingSpec(v: unknown): T.ModelTrainingSpec {
       evaluation: { ...input.evaluation, provider: 'hitch-managed-local', topology: 'local-docker-harbor-dataset' },
       resources: { trainingDevices: gpuUuids(trainingDevices), evaluationDevices: gpuUuids(evaluationDevices), mode: deployment.gpuScheduling.trainEvaluation } })
     validateRuntimePlacement(input.trainer.runtimeLock, deployment)
+    if (input.evaluation.inferencePool) {
+      validateEvaluationPool(input.evaluation.inferencePool, gpuUuids(evaluationDevices), deployment)
+      requireContract(input.evaluation.samplingProfile === input.evaluation.inferencePool.profile,
+        'evaluation-profile-drift', 'samplingProfile must match the frozen inference pool profile')
+    }
+    else requireContract(input.evaluation.samplingProfile === 'baseline', 'invalid-evaluation-profile', 'legacy evaluation retains baseline sampling')
     return input
   }
   requireContract(!(v as T.ModelTrainingSpecV1)?.stages, 'agent-controller-required', 'agent stages require v2 controller deployment')
   const result = parseModelTrainingSpecBody(v)
+  requireContract(!result.evaluation.inferencePool && result.evaluation.samplingProfile === 'baseline',
+    'managed-node-required', 'explicit inference pools require a v2 model-node deployment')
   requireContract(result.trainer.runtimeLock.schemaVersion === 1, 'invalid-runtime-placement', 'v1 experiments require the original container runtime lock')
   return result
 }
@@ -301,4 +312,17 @@ export function parseTrainingBatch(v: unknown): T.ConsumedTrainingBatch {
   const { id, ...body } = result
   requireContract(digestJson(body) === id, 'batch-digest-mismatch', 'batch id does not match its sealed manifest')
   return result
+}
+
+export function validateEvaluationPool(pool: T.EvaluationInferencePoolV3, devices: string[], deployment: T.FrozenExecutionPlacement): void {
+  inferencePool(pool, 'EvaluationInferencePoolV3')
+  const assigned = pool.replicas.flatMap(replica => replica.devices)
+  requireContract(pool.replicas.every(replica => replica.devices.length === pool.tensorParallelSize)
+    && new Set(assigned).size === assigned.length && digestJson([...assigned].sort()) === digestJson([...devices].sort()),
+    'invalid-evaluation-pool', 'replicas must form disjoint TP groups covering the complete evaluation GPU pool')
+  requireContract(pool.modelNode.nodeId === deployment.modelRuntime.nodeId && pool.modelNode.generation === deployment.modelRuntime.generation,
+    'evaluation-node-drift', 'evaluation and training must share the frozen node generation and device ledger')
+  requireContract(pool.maxRunningRequests <= pool.replicas.length * (pool.profile === 'throughput' ? 8 : 1)
+    && pool.maxConcurrent <= 1024 && pool.maxQueuedRequests >= 0,
+    'invalid-evaluation-pool', 'pool and task concurrency exceed the explicit supported capacity')
 }

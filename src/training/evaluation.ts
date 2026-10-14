@@ -14,11 +14,13 @@ export function modelEvaluationRequest(spec: ModelTrainingSpec, model: ModelVers
     runtimeDigest: common.runtimeDigest, protocolDigest: common.protocolDigest, tokenizerDigest: model.tokenizerDigest,
     chatTemplateDigest: model.chatTemplateDigest, architecture: model.architecture, dtype: model.dtype,
     ...(spec.schemaVersion === 2 ? { deploymentDigest: digestJson(spec.deployment) } : {}),
+    ...(spec.evaluation.inferencePool ? { inferencePoolDigest: digestJson(spec.evaluation.inferencePool) } : {}),
   }
   return { schemaVersion: 1, subject: { harnessRef: spec.fixedHarness.manifestRef, modelVersionRef: modelRef, weightsDigest: model.weightsDigest },
     model, condition, datasetRef: dataset.snapshotRef, harnessCommit: spec.fixedHarness.commit, harnessAdapter: spec.fixedHarness.adapter,
     datasetTasks: dataset.tasks, verifierRef: spec.verifier, evaluationDevices: gpuUuids(spec.resources.evaluationDevices),
-    ...(spec.schemaVersion === 2 ? { deployment: spec.deployment } : {}) }
+    ...(spec.schemaVersion === 2 ? { deployment: spec.deployment } : {}),
+    ...(spec.evaluation.inferencePool ? { inferencePool: structuredClone(spec.evaluation.inferencePool) } : {}) }
 }
 export const modelEvidenceKey = (request: Pick<ModelEvaluationRequest, 'subject' | 'condition'>): string => digestJson(request)
 const slotKey = (slot: { taskId: string; attempt: number }): string => JSON.stringify([slot.taskId, slot.attempt])

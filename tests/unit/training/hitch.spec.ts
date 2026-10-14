@@ -16,7 +16,7 @@ vi.mock('../../../src/training/process.js', () => ({ jsonProcess: vi.fn() }))
 describe('Hitch evaluator public CLI boundary', () => {
   const roots: string[] = []
   afterEach(async () => { vi.resetAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-  async function setup(v2 = false) {
+  async function setup(v2 = false, pooled = false) {
     const root = await mkdtemp(join(tmpdir(), 'gear-hitch-evaluator-')); roots.push(root)
     const store = new TrainingContentStore(root), hash = digestJson('identity'), modelId = digestJson('hitch-model'), inferenceId = digestJson('inference')
     const files = [{ path: 'model.safetensors', size: 128, sha256: digestJson('weights') }]
@@ -27,7 +27,7 @@ describe('Hitch evaluator public CLI boundary', () => {
     const placement = freezeExecutionPlacement(deployment(), observation(deployment()))
     const node = { schema_version: '2', node_id: placement.modelRuntime.nodeId, generation: placement.modelRuntime.generation,
       runtime_digest: placement.modelRuntime.runtimeDigest, launcher: 'process' }
-    const lock = { ...(v2 ? { schema_version: '2', model_node: node } : {}), engine: 'sglang', profile: 'baseline', runtime_id: hash, model_id: modelId, inference_id: inferenceId,
+    const lock: Record<string, any> = { ...(v2 ? { schema_version: '2', model_node: node } : {}), engine: 'sglang', profile: 'baseline', runtime_id: hash, model_id: modelId, inference_id: inferenceId,
       execution: { platform: { backend: 'cuda', device_constraint: 'GPU-test' }, max_running_requests: 1 }, resources: { gpu_count: 1 },
       generation: { max_output_tokens: 2048 }, protocol: { api: 'chat-completions' } }
     const budgets = { timeoutSeconds: 10, setupTimeoutSeconds: 20, maxConcurrent: 1 as const, maxEpisodeSteps: 16 as const, infrastructureRetries: 0 as const, maxRepairRounds: 0 }
@@ -36,6 +36,23 @@ describe('Hitch evaluator public CLI boundary', () => {
         verifierDigest: ref.digest, budgetsDigest: digestJson(budgets), runtimeDigest: inferenceCommonDigest(lock), protocolDigest: digestJson(lock.protocol), samplingDigest: digestJson(lock.generation),
         tokenizerDigest: hash, chatTemplateDigest: hash, architecture: 'Tiny', dtype: 'float32' }, datasetRef: ref, harnessCommit: 'a'.repeat(40), harnessAdapter: 'training-tool',
       datasetTasks: [{ id: 'task', family: 'task', taskRef: ref, environmentRef }], verifierRef: ref, evaluationDevices: ['GPU-test'], ...(v2 ? { deployment: placement } : {}) }
+    if (pooled) {
+      const pool = { schemaVersion: 3 as const, profile: 'baseline' as const, tensorParallelSize: 2,
+        replicas: [{ devices: ['GPU-first', 'GPU-second'] }, { devices: ['GPU-third', 'GPU-fourth'] }],
+        maxRunningRequests: 2, maxQueuedRequests: 2, maxConcurrent: 2,
+        modelNode: { nodeId: placement.modelRuntime.nodeId, generation: placement.modelRuntime.generation, runtimeDigest: digestJson('neutral-runtime') } }
+      request.inferencePool = pool
+      request.evaluationDevices = ['GPU-fourth', 'GPU-third', 'GPU-second', 'GPU-first']
+      node.runtime_digest = pool.modelNode.runtimeDigest
+      Object.assign(lock, { schema_version: '3', topology: { replicas: pool.replicas, routing: 'least-active', max_running_requests: 2, max_queued_requests: 2 } })
+      Object.assign(lock.execution.platform, { device_constraint: 'GPU-first', device_constraints: pool.replicas[0]!.devices })
+      Object.assign(lock.execution, { tensor_parallel_size: 2 })
+      lock.resources.gpu_count = 4
+      Object.assign(budgets, { maxConcurrent: 2 })
+      request.condition.budgetsDigest = digestJson(budgets)
+      request.condition.runtimeDigest = inferenceCommonDigest(lock)
+      request.condition.inferencePoolDigest = digestJson(pool)
+    }
     if (v2) request.condition.deploymentDigest = digestJson(placement)
     const state = { submits: 0, submitted: [] as readonly string[], verifierIdentity: hash, node, canonicalNode: node, stopped: false, usage: 12, supportsNode: true, serviceMissing: false,
       command: undefined as { sequence: number; action: string } | undefined, valid: true, repairReplyLost: false, preparationFailure: false, supportsStorage: true }
@@ -47,7 +64,7 @@ describe('Hitch evaluator public CLI boundary', () => {
         throw new TrainingContractError('invalid-input', 'Hitch model aliases must fit the public 64-character contract')
       }
       if (op === 'models add' || op === 'models add-node' || op === 'models inspect') return { model_id: modelId, files, architecture: model.architecture, dtype: model.dtype, tokenizer_digest: hash, template_digest: hash, quantization: null }
-      if (op === 'capabilities --json') return state.supportsNode ? { managed_model_node: '2', model_node_usage: '2', ordered_eval_control: '2', ...(state.supportsStorage ? { model_node_storage: '1' } : {}) } : {}
+      if (op === 'capabilities --json') return state.supportsNode ? { managed_model_node: '2', model_node_usage: '2', ordered_eval_control: '2', standalone_inference: '1', inference_pool: '3', ...(state.supportsStorage ? { model_node_storage: '1' } : {}) } : {}
       if (op === 'eval control') {
         const command = JSON.parse(await readFile(a[a.indexOf('--file') + 1]!, 'utf8'))
         if (state.command && (command.sequence < state.command.sequence || command.sequence === state.command.sequence && command.action !== state.command.action)) throw new TrainingContractError('eval_control_stale', 'newer eval command')
@@ -72,7 +89,7 @@ describe('Hitch evaluator public CLI boundary', () => {
         state.submits++; state.submitted = a; return { eval_id: evalId }
       }
       const option = (name: string) => state.submitted[state.submitted.indexOf(name) + 1]
-      if (op === 'eval inspect') return { control: { state: 'completed' }, request: { model: `local/${modelId}`, dataset: option('--dataset'), harness_ref: option('--harness'), timeout_ms: 10000, max_concurrent: 1, infrastructure_retries: 0, ...(v2 ? { local_inference: { model_node: state.node } } : {}) },
+      if (op === 'eval inspect') return { control: { state: 'completed' }, request: { model: `local/${modelId}`, dataset: option('--dataset'), harness_ref: option('--harness'), timeout_ms: 10000, max_concurrent: Number(option('--max-concurrent')), infrastructure_retries: 0, ...(v2 ? { local_inference: { model_node: state.node } } : {}) },
         submission: { execution: { provider: 'local-docker' } }, plan: state.preparationFailure ? null : { candidate: { inference_id: inferenceId, ...(v2 ? { model_node: state.node } : {}) } },
         result: state.preparationFailure ? { status: 'failed', failure_stage: 'preparing', error: { code: 'inference_process_exited', message: 'private engine details' }, trials: [] }
           : { trials: [{ task_id: 'task', attempt: 1, run_id: runId, observation_status: state.valid ? 'valid' : 'invalid', reward: 0 }] } }
@@ -86,6 +103,41 @@ describe('Hitch evaluator public CLI boundary', () => {
     const evaluator = new HitchModelEvaluator(store, { command: ['fake-hitch'], root: join(root, 'hitch'), workspace: join(root, 'eval'), harnessSourceDirectory: root, python: ['fake-python'], budgets, ...(v2 ? { modelNode: { transport: { type: 'ssh' as const, host: 'vast-debug' }, python: ['python'], configPath: '/workspace/node.json', gateway: { localPort: 33000, nodePort: 33001 } } } : {}) })
     return { evaluator, request, lock, state }
   }
+  it('uses standalone TP replicas and configured task concurrency in the evaluator flow', async () => {
+    const { evaluator, request, state, lock } = await setup(true, true)
+    state.stopped = true
+    const evidence = await evaluator.evaluate(request, 'pooled-evaluation')
+    expect(evidence.complete).toBe(true)
+    const calls = vi.mocked(jsonProcess).mock.calls.map(([, args]) => args)
+    const planned = calls.find(args => args.includes('--pool-file'))!
+    expect(planned[planned.indexOf('--gpu') + 1]).toBe('GPU-first')
+    expect(JSON.parse(await readFile(planned[planned.indexOf('--pool-file') + 1]!, 'utf8'))).toEqual(lock.topology)
+    const registered = calls.find(args => args.includes('register'))!
+    const registration = JSON.parse(await readFile(registered[registered.indexOf('--file') + 1]!, 'utf8'))
+    expect(registration.connection.runtime).toBe('standalone-v1')
+    expect(registration.binding.runtime_digest).toBe(request.inferencePool!.modelNode.runtimeDigest)
+    expect(state.submitted[state.submitted.indexOf('--max-concurrent') + 1]).toBe('2')
+    expect(inferenceCommonDigest({ ...lock, model_id: digestJson('new-weights') })).toBe(request.condition.runtimeDigest)
+    expect(inferenceCommonDigest({ ...lock, topology: { ...lock.topology, max_queued_requests: 3 } })).not.toBe(request.condition.runtimeDigest)
+  })
+  it('rejects a task concurrency change under a frozen pool before submission', async () => {
+    const { evaluator, request, state } = await setup(true, true)
+    evaluator.options.budgets.maxConcurrent = 3
+    request.condition.budgetsDigest = digestJson(evaluator.options.budgets)
+    await expect(evaluator.evaluate(request, 'changed-pool')).rejects.toMatchObject({ code: 'evaluation-concurrency-drift' })
+    expect(state.submits).toBe(0)
+  })
+  it('keeps remote publication on its explicit legacy training-node attestation', async () => {
+    const { evaluator, request } = await setup(true)
+    const publisher = new HitchModelPublisher(evaluator.store, { ...evaluator.options, artifactStorage: 'model-node',
+      frozenNode: request.deployment!.modelRuntime, activationPath: join(evaluator.store.root, 'active-model.json') })
+    await expect(publisher.activate(request.model, 'remote-publication')).resolves.toMatchObject({ active: true })
+    const registrationCall = vi.mocked(jsonProcess).mock.calls.find(([, args]) => args.includes('register'))!
+    const file = registrationCall[1][registrationCall[1].indexOf('--file') + 1]!
+    const registration = JSON.parse(await readFile(file, 'utf8'))
+    expect(registration.connection.runtime).toBe('gear-legacy-v2')
+    expect(registration.binding.runtime_digest).toBe(request.deployment!.modelRuntime.runtimeDigest)
+  })
   it('imports and verifies a model on its node without materializing weights on the controller', async () => {
     const { evaluator, request, state } = await setup(true)
     evaluator.options.artifactStorage = 'model-node'

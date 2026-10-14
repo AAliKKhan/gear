@@ -20,7 +20,7 @@ export async function registerHitchModelNode(
   const file = join(directory, 'binding.json')
   const registration = join(directory, 'registration.json')
   await atomicWrite(file, binding)
-  await atomicWrite(registration, { schema_version: '2', binding, connection: options.modelNode })
+  await atomicWrite(registration, { schema_version: '2', binding, connection: { ...options.modelNode, runtime: options.modelNode.runtime ?? 'gear-legacy-v2' } })
   const observed = await jsonProcess(options.command, ['--root', options.root, 'model-node', 'register', '--file', registration]) as { binding?: unknown } | null
   requireContract(observed && digestJson(observed.binding) === digestJson(binding),
     'model-node-registration-drift', 'Hitch registered another model-node identity')

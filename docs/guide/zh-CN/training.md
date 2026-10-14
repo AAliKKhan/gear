@@ -42,3 +42,5 @@ GEAR_TRAINING_TEST_PYTHON="$VIRTUAL_ENV/bin/python" npm run test:training
 ```
 
 macOS 安装 Torch 时省略 `--index-url`。CI 的 `Training / CPU` 会运行 Python 测试。
+
+独立模型评测推理支持显式 TP、副本池和可配置 trial 并发，安装、身份与共享 GPU 切换见[独立推理服务](../../training/standalone-inference.zh-CN.md)。训练 rollout 行为保持现状。

@@ -38,7 +38,10 @@ export function parseTrainingDeployment(value: unknown): T.TrainingDeploymentCon
   const usedPorts = new Set<number>()
   for (const [name, input] of Object.entries(nodes)) {
     requireContract(id(name), 'invalid-model-node', 'invalid node reference')
-    const n = object(input, ['transport', 'workspace', 'python', 'configPath', 'gateway'], `nodes.${name}`)
+    const runtimeKeys = input && typeof input === 'object' && 'runtime' in input ? ['runtime'] : []
+    const n = object(input, ['transport', 'workspace', 'python', 'configPath', 'gateway', ...runtimeKeys], `nodes.${name}`)
+    requireContract(n.runtime === undefined || ['standalone-v1', 'gear-legacy-v2'].includes(String(n.runtime)),
+      'invalid-node-runtime', 'node runtime must be an explicit supported adapter')
     const transport = n.transport as Record<string, unknown> | null
     object(transport, transport?.type === 'ssh' ? ['type', 'host'] : ['type'], 'node transport')
     requireContract(transport?.type === 'local' || (transport?.type === 'ssh' && id(transport.host)), 'invalid-node-transport', 'use local or an SSH Host alias; SSH credentials stay in user configuration')
