@@ -5,7 +5,7 @@ import { digestJson } from './digest.js'
 import { jsonProcess } from './process.js'
 import { requireContract } from './schema.js'
 import { atomicWrite, TrainingContentStore, withTrainingFileLock } from './store.js'
-import { hitchModelNodeBinding, registerHitchModelNode } from './hitch-model-node.js'
+import { hitchModelNodeBinding, registerHitchTrainingModelNode } from './hitch-model-node.js'
 import type { FrozenExecutionPlacement, ModelNodeConnection, ModelVersion } from './types.js'
 
 export interface HitchModelPublisherOptions {
@@ -32,7 +32,7 @@ export class HitchModelPublisher implements ModelPublisher {
       const capabilities = await call(['capabilities', '--json']) as Record<string, unknown>
       requireContract(capabilities.managed_model_node === '2' && capabilities.model_node_storage === '1',
         'remote-model-storage-unavailable', 'Hitch must support model-node artifact storage')
-      const nodeFile = await registerHitchModelNode(this.options, modelNode,
+      const nodeFile = await registerHitchTrainingModelNode(this.options, modelNode,
         join(dirname(this.options.activationPath), 'model-nodes', digestJson(modelNode).slice(7)))
       const refFile = join(directory, 'snapshot-ref.json')
       await atomicWrite(refFile, model.hfSnapshotRef)

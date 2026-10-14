@@ -26,3 +26,13 @@ export async function registerHitchModelNode(
     'model-node-registration-drift', 'Hitch registered another model-node identity')
   return file
 }
+
+/** Training snapshots are attested by Gear, independently of evaluation inference. */
+export function registerHitchTrainingModelNode(
+  options: Parameters<typeof registerHitchModelNode>[0],
+  binding: ReturnType<typeof hitchModelNodeBinding>,
+  directory: string,
+): Promise<string> {
+  requireContract(options.modelNode, 'managed-node-not-configured', 'a private training-node connection is required')
+  return registerHitchModelNode({ ...options, modelNode: { ...options.modelNode, runtime: 'gear-legacy-v2' } }, binding, directory)
+}

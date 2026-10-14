@@ -129,6 +129,7 @@ describe('Hitch evaluator public CLI boundary', () => {
   })
   it('keeps remote publication on its explicit legacy training-node attestation', async () => {
     const { evaluator, request } = await setup(true)
+    evaluator.options.modelNode!.runtime = 'standalone-v1'
     const publisher = new HitchModelPublisher(evaluator.store, { ...evaluator.options, artifactStorage: 'model-node',
       frozenNode: request.deployment!.modelRuntime, activationPath: join(evaluator.store.root, 'active-model.json') })
     await expect(publisher.activate(request.model, 'remote-publication')).resolves.toMatchObject({ active: true })

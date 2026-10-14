@@ -88,7 +88,7 @@ export class HitchModelEvaluator implements ModelEvaluator {
     if (request.inferencePool) requireContract(capabilities.standalone_inference === '1' && capabilities.inference_pool === '3',
       'inference-pool-capability-missing', 'Hitch must support standalone inference pool v3')
     return registerHitchModelNode({ ...this.options, modelNode: { ...this.options.modelNode,
-      runtime: request.inferencePool ? 'standalone-v1' : this.options.modelNode.runtime ?? 'gear-legacy-v2' } }, binding, directory)
+      runtime: request.inferencePool ? 'standalone-v1' : 'gear-legacy-v2' } }, binding, directory)
   }
   private async services(request: ModelEvaluationRequest, journal: EvalJournal, stop: boolean): Promise<{ resourcesReleased: boolean; gpuSeconds: number }> {
     const binding = evaluationModelNode(request)

@@ -16,7 +16,7 @@ import { observeExecutionPlacement } from './placement-observation.js'
 import { preflightDeployment } from './preflight-deployment.js'
 import { digestJson } from './digest.js'
 import { retainContentGraph } from './retention.js'
-import type { ModelTrainingSpec, TrainingDeploymentConfig, NodeIdentity, ContentRef, ModelTrainingRun } from './types.js'
+import type { ModelTrainingSpec, TrainingDeploymentConfig, ModelNodeConnection, NodeIdentity, ContentRef, ModelTrainingRun } from './types.js'
 
 export interface TrainingControllerConfigV1 {
   schemaVersion: 1
@@ -30,6 +30,8 @@ export interface TrainingControllerConfigV2 {
   storeRoot: string
   artifactStorage?: 'controller' | 'model-node'
   deployment: TrainingDeploymentConfig
+  /** Independent inference interpreter/config; training transport always uses Gear. */
+  evaluationNode?: Pick<ModelNodeConnection, 'transport' | 'python' | 'configPath'>
   evaluationGateway: { localPort: number; nodePort: number }
   episodeTimeoutSeconds: number
   hitch: Omit<HitchModelEvaluatorOptions, 'modelNode' | 'deployment'>
@@ -46,12 +48,21 @@ export function parseTrainingControllerConfig(value: unknown): TrainingControlle
   else {
     config.deployment = parseTrainingDeployment(config.deployment)
     const connection = config.deployment.nodes[config.deployment.modelRuntime.nodeRef]!, gateway = config.evaluationGateway
+    if (config.evaluationNode !== undefined) {
+      // Reuse the connection boundary validation without adding a second runtime selector.
+      requireContract(!!config.evaluationNode && typeof config.evaluationNode === 'object' && !Array.isArray(config.evaluationNode)
+        && Object.keys(config.evaluationNode).sort().join(',') === 'configPath,python,transport',
+        'invalid-evaluation-node', 'evaluationNode accepts only transport, python and configPath')
+      parseTrainingDeployment({ ...config.deployment, nodes: { [config.deployment.modelRuntime.nodeRef]: {
+        ...config.evaluationNode, workspace: connection.workspace, gateway: connection.gateway,
+      } } })
+    }
     requireContract(config.artifactStorage === undefined || ['controller', 'model-node'].includes(config.artifactStorage),
       'invalid-controller-config', 'artifactStorage must select controller or model-node')
     requireContract(config.deployment.modelRuntime.launcher === 'process' && !!gateway
       && [gateway.localPort, gateway.nodePort].every(port => Number.isSafeInteger(port) && port > 0 && port < 65536)
       && gateway.localPort !== connection.gateway.localPort && gateway.nodePort !== connection.gateway.nodePort
-      && (connection.transport.type !== 'local' || gateway.localPort === gateway.nodePort)
+      && ((config.evaluationNode ?? connection).transport.type !== 'local' || gateway.localPort === gateway.nodePort)
       && Number.isSafeInteger(config.episodeTimeoutSeconds) && config.episodeTimeoutSeconds > 0,
       'invalid-controller-config', 'v2 requires a process model node, distinct stable evaluation/rollout routes and a positive episode timeout')
     requireContract(!('modelNode' in config.hitch) && !('deployment' in config.hitch) && !('slime' in config),
@@ -68,6 +79,8 @@ export function trainingController(config: TrainingControllerConfig, spec: Model
     return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, new HitchModelEvaluator(store, config.hitch)) }
   }
   requireContract(spec.schemaVersion === 2, 'controller-spec-version-mismatch', 'v2 controller needs a v2 experiment')
+  requireContract(!config.evaluationNode || !!spec.evaluation.inferencePool,
+    'evaluation-node-without-pool', 'evaluationNode requires an explicit standalone inference pool')
   const placement = spec.deployment, node = placement.modelRuntime
   requireContract(digestJson(config.deployment.taskExecution) === digestJson({ placement: placement.taskExecution.placement, provider: placement.taskExecution.provider })
     && digestJson(config.deployment.modelRuntime) === digestJson({ nodeRef: node.nodeRef, launcher: node.launcher })
@@ -79,9 +92,10 @@ export function trainingController(config: TrainingControllerConfig, spec: Model
   const artifactStorage = config.artifactStorage ?? (connection.transport.type === 'ssh' ? 'model-node' : 'controller')
   const trainer = new NodeSlimeModelTrainer(transport, store, episodes, artifactStorage)
   const { workspace: _workspace, ...inferenceConnection } = connection
-  const evaluator = new HitchModelEvaluator(store, { ...config.hitch, artifactStorage, deployment: config.deployment, modelNode: { ...inferenceConnection, gateway: config.evaluationGateway } })
+  const evaluator = new HitchModelEvaluator(store, { ...config.hitch, artifactStorage, deployment: config.deployment,
+    modelNode: { ...inferenceConnection, ...config.evaluationNode, gateway: config.evaluationGateway } })
   const publisher = new HitchModelPublisher(store, { ...config.hitch, activationPath: config.activationPath, artifactStorage,
-    frozenNode: node, modelNode: { ...inferenceConnection, gateway: config.evaluationGateway } })
+    frozenNode: node, modelNode: { ...inferenceConnection, runtime: 'gear-legacy-v2' } })
   return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, evaluator) }
 }
 /** Keep the existing durable coordinator moving; never silently resume a stopped job. */

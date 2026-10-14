@@ -36,7 +36,8 @@ describe('versioned public training controller', () => {
     expect(evaluator.options.python).toEqual(['controller-python'])
     expect(controller.publisher.options.artifactStorage).toBe('model-node')
     expect(controller.publisher.options.frozenNode).toEqual(spec.deployment.modelRuntime)
-    expect(controller.publisher.options.modelNode).toEqual(evaluator.options.modelNode)
+    expect(controller.publisher.options.modelNode?.runtime).toBe('gear-legacy-v2')
+    expect(controller.publisher.options.modelNode?.gateway).toEqual(config.deployment.nodes.gpu!.gateway)
     const file = join(root, 'controller.json'), specFile = join(root, 'spec.json')
     await writeFile(file, JSON.stringify(config)); await writeFile(specFile, JSON.stringify(spec))
     const created = await trainingCommand(['init', specFile, '--config', file]) as ModelExperimentState
@@ -44,6 +45,18 @@ describe('versioned public training controller', () => {
     expect(admitted.request.schemaVersion).toBe(2)
     expect(await trainingCommand(['status', created.id, admitted.id, '--config', file])).toEqual(admitted)
     expect((await store.load(created.id)).specDigest).toBe(digestJson(spec))
+  })
+  it('isolates an explicit standalone evaluation connection from training and publication', () => {
+    config.deployment.nodes.gpu!.runtime = 'standalone-v1'
+    config.evaluationNode = { transport: { type: 'ssh', host: 'inference-host' }, python: ['/opt/inference/bin/python'], configPath: '/workspace/inference.json' }
+    const spec = v2spec(legacy)
+    spec.evaluation.inferencePool = { schemaVersion: 3, profile: 'baseline', tensorParallelSize: 1, replicas: [{ devices: ['GPU-123'] }],
+      maxRunningRequests: 1, maxQueuedRequests: 1, maxConcurrent: 1, modelNode: { nodeId: 'gpu-node', generation: 'boot-1', runtimeDigest: digestJson('inference-runtime') } }
+    const controller = trainingController(parseTrainingControllerConfig(config), spec, store)
+    const evaluator = controller.coordinator.evaluator as HitchModelEvaluator
+    expect(evaluator.options.modelNode).toMatchObject({ ...config.evaluationNode, gateway: config.evaluationGateway })
+    expect(controller.publisher.options.modelNode).toMatchObject({ python: ['/opt/training/bin/python'], configPath: '/workspace/node.json', runtime: 'gear-legacy-v2' })
+    expect(() => parseTrainingControllerConfig({ ...config, evaluationNode: { ...config.evaluationNode, runtime: 'standalone-v1' } })).toThrow('only transport')
   })
   it('run SPEC creates one experiment and run; run EXP RUN follows the existing identity', async () => {
     const file = join(root, 'controller.json'), specFile = join(root, 'spec.json')
@@ -114,6 +127,19 @@ describe('versioned public training controller', () => {
     const spec = v2spec(legacy, deployment('remote'))
     expect(() => trainingController(config, spec)).toThrow('frozen experiment')
     expect(() => parseTrainingControllerConfig({ ...config, hitch: { ...config.hitch, modelNode: {} } })).toThrow('separate Hitch node override')
+  })
+  it('validates the evaluation transport independently and rejects malformed optional connections', () => {
+    for (const evaluationNode of [null, false, [], 'invalid']) {
+      expect(() => parseTrainingControllerConfig({ ...config, evaluationNode })).toThrow('evaluationNode accepts')
+    }
+    config.evaluationNode = { transport: { type: 'local' }, python: ['python'], configPath: '/inference/node.json' }
+    expect(() => parseTrainingControllerConfig(config)).toThrow('distinct stable')
+    config.evaluationGateway.nodePort = config.evaluationGateway.localPort
+    expect(parseTrainingControllerConfig(config)).toBe(config)
+    config.deployment.nodes.gpu!.transport = { type: 'local' }
+    config.evaluationNode.transport = { type: 'ssh', host: 'inference' }
+    config.evaluationGateway.nodePort++
+    expect(parseTrainingControllerConfig(config)).toBe(config)
   })
   it('preserves the v1 controller adapter and its original spec digest', () => {
     const original = digestJson(legacy)
