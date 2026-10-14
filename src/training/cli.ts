@@ -16,6 +16,7 @@ import { observeExecutionPlacement } from './placement-observation.js'
 import { preflightDeployment } from './preflight-deployment.js'
 import { digestJson } from './digest.js'
 import { retainContentGraph } from './retention.js'
+import { ExternalFileEndpointPreparer, type ExternalEndpointPreparationConfig } from './endpoint-binding.js'
 import type { ModelTrainingSpec, TrainingDeploymentConfig, ModelNodeConnection, NodeIdentity, ContentRef, ModelTrainingRun } from './types.js'
 
 export interface TrainingControllerConfigV1 {
@@ -24,18 +25,17 @@ export interface TrainingControllerConfigV1 {
   slime: SlimeTrainerOptions
   hitch: HitchModelEvaluatorOptions
   activationPath: string
+  evaluationBindings: ExternalEndpointPreparationConfig
 }
 export interface TrainingControllerConfigV2 {
   schemaVersion: 2
   storeRoot: string
   artifactStorage?: 'controller' | 'model-node'
   deployment: TrainingDeploymentConfig
-  /** Independent inference interpreter/config; training transport always uses Gear. */
-  evaluationNode?: Pick<ModelNodeConnection, 'transport' | 'python' | 'configPath'>
-  evaluationGateway: { localPort: number; nodePort: number }
   episodeTimeoutSeconds: number
-  hitch: Omit<HitchModelEvaluatorOptions, 'modelNode' | 'deployment'>
+  hitch: HitchModelEvaluatorOptions
   activationPath: string
+  evaluationBindings: ExternalEndpointPreparationConfig
 }
 export type TrainingControllerConfig = TrainingControllerConfigV1 | TrainingControllerConfigV2
 
@@ -47,27 +47,17 @@ export function parseTrainingControllerConfig(value: unknown): TrainingControlle
   if (config.schemaVersion === 1) requireContract(!!config.slime && Array.isArray(config.slime.python), 'invalid-controller-config', 'v1 controller requires local Slime configuration')
   else {
     config.deployment = parseTrainingDeployment(config.deployment)
-    const connection = config.deployment.nodes[config.deployment.modelRuntime.nodeRef]!, gateway = config.evaluationGateway
-    if (config.evaluationNode !== undefined) {
-      // Reuse the connection boundary validation without adding a second runtime selector.
-      requireContract(!!config.evaluationNode && typeof config.evaluationNode === 'object' && !Array.isArray(config.evaluationNode)
-        && Object.keys(config.evaluationNode).sort().join(',') === 'configPath,python,transport',
-        'invalid-evaluation-node', 'evaluationNode accepts only transport, python and configPath')
-      parseTrainingDeployment({ ...config.deployment, nodes: { [config.deployment.modelRuntime.nodeRef]: {
-        ...config.evaluationNode, workspace: connection.workspace, gateway: connection.gateway,
-      } } })
-    }
     requireContract(config.artifactStorage === undefined || ['controller', 'model-node'].includes(config.artifactStorage),
       'invalid-controller-config', 'artifactStorage must select controller or model-node')
-    requireContract(config.deployment.modelRuntime.launcher === 'process' && !!gateway
-      && [gateway.localPort, gateway.nodePort].every(port => Number.isSafeInteger(port) && port > 0 && port < 65536)
-      && gateway.localPort !== connection.gateway.localPort && gateway.nodePort !== connection.gateway.nodePort
-      && ((config.evaluationNode ?? connection).transport.type !== 'local' || gateway.localPort === gateway.nodePort)
+    requireContract(config.deployment.modelRuntime.launcher === 'process'
       && Number.isSafeInteger(config.episodeTimeoutSeconds) && config.episodeTimeoutSeconds > 0,
-      'invalid-controller-config', 'v2 requires a process model node, distinct stable evaluation/rollout routes and a positive episode timeout')
+      'invalid-controller-config', 'v2 requires a process training node and a positive episode timeout')
+    requireContract(!('evaluationNode' in config) && !('evaluationGateway' in config), 'removed-evaluation-runtime',
+      'configure evaluationBindings for externally prepared model endpoints; remove evaluationNode/evaluationGateway')
     requireContract(!('modelNode' in config.hitch) && !('deployment' in config.hitch) && !('slime' in config),
       'invalid-controller-config', 'v2 model connection comes from deployment; do not supply legacy Slime or a separate Hitch node override')
   }
+  new ExternalFileEndpointPreparer(config.evaluationBindings)
   return config
 }
 
@@ -76,11 +66,9 @@ export function trainingController(config: TrainingControllerConfig, spec: Model
   if (config.schemaVersion === 1) {
     const trainer = new SlimeModelTrainer(config.slime)
     const publisher = new HitchModelPublisher(store, { ...config.hitch, activationPath: config.activationPath })
-    return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, new HitchModelEvaluator(store, config.hitch)) }
+    return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, new HitchModelEvaluator(store, config.hitch), new ExternalFileEndpointPreparer(config.evaluationBindings)) }
   }
   requireContract(spec.schemaVersion === 2, 'controller-spec-version-mismatch', 'v2 controller needs a v2 experiment')
-  requireContract(!config.evaluationNode || !!spec.evaluation.inferencePool,
-    'evaluation-node-without-pool', 'evaluationNode requires an explicit standalone inference pool')
   const placement = spec.deployment, node = placement.modelRuntime
   requireContract(digestJson(config.deployment.taskExecution) === digestJson({ placement: placement.taskExecution.placement, provider: placement.taskExecution.provider })
     && digestJson(config.deployment.modelRuntime) === digestJson({ nodeRef: node.nodeRef, launcher: node.launcher })
@@ -92,11 +80,10 @@ export function trainingController(config: TrainingControllerConfig, spec: Model
   const artifactStorage = config.artifactStorage ?? (connection.transport.type === 'ssh' ? 'model-node' : 'controller')
   const trainer = new NodeSlimeModelTrainer(transport, store, episodes, artifactStorage)
   const { workspace: _workspace, ...inferenceConnection } = connection
-  const evaluator = new HitchModelEvaluator(store, { ...config.hitch, artifactStorage, deployment: config.deployment,
-    modelNode: { ...inferenceConnection, ...config.evaluationNode, gateway: config.evaluationGateway } })
+  const evaluator = new HitchModelEvaluator(store, { ...config.hitch, executionProvider: placement.taskExecution.provider })
   const publisher = new HitchModelPublisher(store, { ...config.hitch, activationPath: config.activationPath, artifactStorage,
-    frozenNode: node, modelNode: { ...inferenceConnection, runtime: 'gear-legacy-v2' } })
-  return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, evaluator) }
+    frozenNode: node, modelNode: inferenceConnection })
+  return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, evaluator, new ExternalFileEndpointPreparer(config.evaluationBindings)) }
 }
 /** Keep the existing durable coordinator moving; never silently resume a stopped job. */
 export async function runTraining(
@@ -159,6 +146,19 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
   const file = args.splice(index, 2)[1]!
   const rawConfig = JSON.parse(await readFile(file, 'utf8'))
   if (rawConfig.kind === 'training-script-controller') return scriptCommand(action!, args, parseScriptControllerConfig(rawConfig))
+  if (args[0]?.startsWith('exp_') && ['status', 'resume', 'advance', 'run', 'pause', 'close', 'admit'].includes(action!)) {
+    requireContract(typeof rawConfig.storeRoot === 'string' && rawConfig.storeRoot.startsWith('/'), 'invalid-controller-config', 'historical inspection requires an absolute storeRoot')
+    const saved = await new ModelTrainingStore(rawConfig.storeRoot).load(args[0])
+    if (action === 'status') {
+      requireContract(args.length >= 1 && args.length <= 2, 'usage', 'status EXP [RUN]')
+      if (args.length === 1) return saved
+      const run = saved.runs[args[1]!]
+      requireContract(run, 'unknown-training-run', 'unknown model training run')
+      return run
+    }
+    requireContract(saved.spec.evaluation.provider === 'hitch-endpoint', 'historical-run-read-only',
+      'historical managed inference experiments remain readable; create a new endpoint experiment to rerun')
+  }
   const config = parseTrainingControllerConfig(rawConfig)
   const scriptId = args.length === 1 && /^script_[a-f0-9]{32}$/.test(args[0]!)
   const scriptSpec = action === 'run' && args.length === 1 && !scriptId

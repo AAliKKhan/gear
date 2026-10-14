@@ -94,11 +94,16 @@ export class ModelTrainingStore extends TrainingContentStore {
   async load(id: string): Promise<ModelExperimentState> {
     const state = JSON.parse(await readFile(this.statePath(id), 'utf8')) as ModelExperimentState
     requireContract(state.schemaVersion === 1 && state.id === id, 'invalid-state', 'model experiment identity mismatch')
-    parseModelTrainingSpec(state.spec)
+    // Historical experiments retain their exact bytes and digests for inspection.
+    // Their removed managed runtime cannot be resumed by the endpoint coordinator.
+    const provider = String(state.spec.evaluation.provider)
+    if (provider === 'hitch-endpoint') parseModelTrainingSpec(state.spec)
+    else requireContract(['hitch-managed-local', 'hitch-managed'].includes(provider) && [1, 2].includes(state.spec.schemaVersion),
+      'invalid-state', 'unknown historical model experiment contract')
     requireContract(digestJson(state.spec) === state.specDigest, 'experiment-drift', 'sealed experiment specification changed')
     requireContract(state.runs !== null && typeof state.runs === 'object' && Array.isArray(state.releases), 'invalid-state', 'invalid model state')
     for (const [runId, run] of Object.entries(state.runs)) {
-      if (run.evaluationControl) requireContract(state.spec.schemaVersion === 2 && Object.keys(run.evaluationControl).length === 3 && run.evaluationControl.schemaVersion === 2
+      if (run.evaluationControl) requireContract(Object.keys(run.evaluationControl).length === 3 && run.evaluationControl.schemaVersion === 2
         && Number.isSafeInteger(run.evaluationControl.sequence) && run.evaluationControl.sequence >= 0
         && ['start', 'pause'].includes(run.evaluationControl.action), 'invalid-evaluation-control', 'saved evaluation control intent is invalid')
       if (run.trainingControl) requireContract(state.spec.schemaVersion === 2 && Object.keys(run.trainingControl).length === 3 && run.trainingControl.schemaVersion === 2

@@ -273,10 +273,8 @@ export interface ModelTrainingSpecV1 {
     auxiliaryModelCalls: false
   }
   evaluation: {
-    provider: 'hitch-managed-local'
-    topology: 'local-docker-harbor-dataset'
-    samplingProfile: 'baseline' | 'throughput'
-    inferencePool?: EvaluationInferencePoolV3
+    provider: 'hitch-endpoint'
+    topology: 'harbor-dataset'
     common: { runtimeDigest: string; protocolDigest: string; samplingDigest: string; budgetsDigest: string; attempts: number }
     policy: {
       minDevGain: number
@@ -286,21 +284,9 @@ export interface ModelTrainingSpecV1 {
       maxHeldOutEvaluations: number
     }
   }
-  resources: { trainingDevices: string[]; evaluationDevices: string[]; mode: 'isolated' | 'sequential' }
-  budgets: { totalGpuSeconds: number; maxRolloutTokens: number; maxEpisodeSteps: number; maxGroupResamples: number }
+  resources: { trainingDevices: string[] }
+  budgets: { gpuSecondsScope: 'training' | 'total'; totalGpuSeconds: number; maxRolloutTokens: number; maxEpisodeSteps: number; maxGroupResamples: number }
   publication: { mode: 'explicit' }
-}
-
-/** Explicit ordinary inference deployment; candidate weights are bound separately. */
-export interface EvaluationInferencePoolV3 {
-  schemaVersion: 3
-  profile: 'baseline' | 'throughput'
-  tensorParallelSize: number
-  replicas: { devices: string[] }[]
-  maxRunningRequests: number
-  maxQueuedRequests: number
-  maxConcurrent: number
-  modelNode: { nodeId: string; generation: string; runtimeDigest: string }
 }
 
 export interface NodeIdentity { nodeId: string; generation: string }
@@ -310,7 +296,6 @@ export interface ModelNodeConnection {
   transport: { type: 'local' } | { type: 'ssh'; host: string }
   workspace: string
   python: string[]
-  runtime?: 'standalone-v1' | 'gear-legacy-v2'
   configPath: string
   gateway: { localPort: number; nodePort: number }
 }
@@ -330,8 +315,8 @@ export interface FrozenExecutionPlacement {
 export interface ModelTrainingSpecV2 extends Omit<ModelTrainingSpecV1, 'schemaVersion' | 'resources' | 'evaluation'> {
   schemaVersion: 2
   deployment: FrozenExecutionPlacement
-  resources: { trainingDevices: NodeGpu[]; evaluationDevices: NodeGpu[] }
-  evaluation: Omit<ModelTrainingSpecV1['evaluation'], 'provider' | 'topology'> & { provider: 'hitch-managed'; topology: 'harbor-dataset' }
+  resources: { trainingDevices: NodeGpu[] }
+  evaluation: ModelTrainingSpecV1['evaluation']
 }
 export type ModelTrainingSpec = ModelTrainingSpecV1 | ModelTrainingSpecV2
 
@@ -367,7 +352,7 @@ export interface TrainingRequestV1 {
   verifier: ContentRef
   trainer: ModelTrainingSpec['trainer']
   rollout: ModelTrainingSpec['rollout']
-  budgets: ModelTrainingSpec['budgets']
+  budgets: Omit<ModelTrainingSpec['budgets'], 'gpuSecondsScope'> & { gpuSecondsScope?: 'training' | 'total' }
   trainingDevices: string[]
   recipeDigest: string
   datasetSplitDigest: string
@@ -417,7 +402,7 @@ export interface TrainingControlIntent { schemaVersion: 2; sequence: number; act
 
 export interface EvaluationSubject { harnessRef: ContentRef; modelVersionRef: ContentRef; weightsDigest: string }
 export interface ModelEvaluationCondition {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   partition: 'dev' | 'held-out'
   datasetDigest: string
   slots: { taskId: string; attempt: number; environmentDigest: string }[]
@@ -433,8 +418,11 @@ export interface ModelEvaluationCondition {
   /** Present for v2 experiments; a different execution location needs a new baseline. */
   deploymentDigest?: string
   inferencePoolDigest?: string
+  /** Ordinary endpoint protocol; historical conditions retain their original shape. */
+  taskExecutionDigest?: string
+  endpointApi?: 'responses' | 'chat-completions'
 }
-export interface ModelEvaluationEvidence {
+export interface LegacyModelEvaluationEvidence {
   schemaVersion: 1
   evalId: string
   subject: EvaluationSubject
@@ -446,25 +434,76 @@ export interface ModelEvaluationEvidence {
   complete: boolean
   gpuSeconds: number
 }
+export interface EndpointDeploymentReceipt {
+  schema_version: '1'
+  /** Immutable HF snapshot digest, attested by the trusted deployment owner. */
+  model_digest: string
+  wire_model: string
+  deployment_ref: string
+  source: string
+  service_config: Record<string, unknown>
+}
+export interface EvaluationEndpointBinding {
+  schema_version: '1'
+  kind: 'external-endpoint'
+  endpoint_ref: string
+  endpoint_revision: string
+  api: 'responses' | 'chat-completions'
+  wire_model: string
+  capabilities: { streaming: boolean; tool_calls: boolean; parallel_tool_calls: boolean; input_modalities: ['text'] }
+  generation: { max_output_tokens: number; temperature?: number; top_p?: number; top_k?: number; min_p?: number; repetition_penalty?: number; seed?: number }
+  deployment_receipt: EndpointDeploymentReceipt
+}
+export interface ReadyEvaluationEndpointBinding extends EvaluationEndpointBinding {
+  connection: { base_url: string; auth: { kind: 'none' } | { kind: 'env'; name: string } }
+}
+export interface EvaluationUsage {
+  gpuSeconds: number | null
+  gpuSecondsSource: string | null
+  usageSource?: string
+  inputTokens?: number
+  outputTokens?: number
+  requests?: number
+  elapsedSeconds?: number
+}
+export interface EndpointModelEvaluationEvidence extends Omit<LegacyModelEvaluationEvidence, 'schemaVersion' | 'hitchModelId' | 'inferenceLockRef' | 'gpuSeconds'>, EvaluationUsage {
+  schemaVersion: 2
+  endpointBinding: EvaluationEndpointBinding
+}
+/** V1 is read-only historical evidence; new evaluation always produces V2. */
+export type ModelEvaluationEvidence = LegacyModelEvaluationEvidence | EndpointModelEvaluationEvidence
 export interface ModelEvaluationRequest {
-  schemaVersion: 1
+  schemaVersion: 2
   subject: EvaluationSubject
   model: ModelVersion
   condition: ModelEvaluationCondition
+  endpointBinding: ReadyEvaluationEndpointBinding
   datasetRef: ContentRef
   harnessCommit: string
   harnessAdapter: string
   datasetTasks: DatasetPartition['tasks']
   verifierRef: ContentRef
-  evaluationDevices: string[]
-  inferencePool?: EvaluationInferencePoolV3
-  deployment?: FrozenExecutionPlacement
+}
+export interface ModelEndpointPreparer {
+  /** Frozen deployment configuration, excluding model-specific endpoint revisions. */
+  configurationDigest: string
+  trustedReceiptSources: string[]
+  /** Missing externally prepared artifacts return undefined; never deploy here. */
+  prepare(model: ModelVersion, modelRef: ContentRef): Promise<ReadyEvaluationEndpointBinding | undefined>
+}
+export interface ModelEndpointPreparation {
+  schemaVersion: 1
+  intentDigest: string
+  modelRef: ContentRef
+  status: 'waiting' | 'ready'
+  bindingRef?: ContentRef
 }
 export interface ModelEvaluator {
   evaluate(request: ModelEvaluationRequest, idempotencyKey: string, intent?: TrainingControlIntent): Promise<ModelEvaluationEvidence>
-  /** Read-only cumulative cost; null means no local journal yet, never release. */
-  observeUsage?(request: ModelEvaluationRequest, idempotencyKey: string): Promise<{ gpuSeconds: number | null }>
-  cancel?(request: ModelEvaluationRequest, idempotencyKey: string, intent?: TrainingControlIntent): Promise<{ resourcesReleased: boolean; gpuSeconds: number }>
+  /** Read-only cumulative task usage; unknown shared GPU time remains null. */
+  observeUsage?(request: ModelEvaluationRequest, idempotencyKey: string): Promise<EvaluationUsage>
+  /** Task/request termination says nothing about external service or GPU release. */
+  cancel?(request: ModelEvaluationRequest, idempotencyKey: string, intent?: TrainingControlIntent): Promise<EvaluationUsage & { tasksCompleted: boolean }>
 }
 
 export interface PairedModelReport {
@@ -501,8 +540,8 @@ export interface ModelTrainingRun {
   status?: TrainingStatus
   decision?: ModelDecision
   heldOutQueries: number
-  evaluationIntents: Record<string, { key: string; evidenceRef?: ContentRef; chargedGpuSeconds?: number }>
-  evaluationResourcesReleased: boolean
+  evaluationIntents: Record<string, { key: string; evidenceRef?: ContentRef; chargedGpuSeconds?: number; gpuSecondsSource?: string; observedUsage?: EvaluationUsage }>
+  evaluationTasksCompleted: boolean
   error?: string
 }
 export interface ModelExperimentState {
@@ -516,4 +555,6 @@ export interface ModelExperimentState {
   activeReleaseId?: string
   activationIntent?: { id: string; modelRef: ContentRef; expectedReleaseId: string | null; rollbackReleaseId?: string }
   usage: TrainingUsage
+  evaluationUsage?: EvaluationUsage
+  endpointPreparations?: Record<string, ModelEndpointPreparation>
 }

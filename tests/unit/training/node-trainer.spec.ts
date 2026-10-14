@@ -1,3 +1,4 @@
+import { fixtureEndpointPreparer } from './fixture.js'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -20,7 +21,7 @@ describe('model-node trainer and controller episode lifecycle', () => {
   async function setup() {
     const root = await mkdtemp(join(tmpdir(), 'gear-node-trainer-')); roots.push(root)
     const store = new ModelTrainingStore(join(root, 'controller')), node = new ModelTrainingStore(join(root, 'node'))
-    const coordinator = new ModelTrainingCoordinator(store, new FixtureTrainer(store), new FixtureEvaluator(store))
+    const coordinator = new ModelTrainingCoordinator(store, new FixtureTrainer(store), new FixtureEvaluator(store), fixtureEndpointPreparer)
     const spec = v2spec(await fixture(store))
     const file = await store.putBytes(Buffer.from('CPU model fixture'), 'application/octet-stream')
     const hf = await store.putJson({ schemaVersion: 1, format: 'hf-safetensors', files: [{ path: 'model.safetensors', size: 17, sha256: file.digest, contentRef: file }] })

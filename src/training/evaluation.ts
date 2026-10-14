@@ -1,26 +1,24 @@
 import { builtinPolicy } from '../adapters/python/builtin-policy.js'
 import { digestJson } from './digest.js'
-import { gpuUuids } from './deployment.js'
+import { publicEndpointBinding } from './endpoint-binding.js'
 import { parseModelEvaluationEvidence, requireContract } from './schema.js'
-import type { ContentRef, ModelDecision, ModelEvaluationCondition, ModelEvaluationEvidence, ModelEvaluationRequest, ModelTrainingSpec, ModelVersion, PairedModelReport } from './types.js'
+import type { ContentRef, ModelDecision, ModelEvaluationCondition, ModelEvaluationEvidence, ModelEvaluationRequest, ModelTrainingSpec, ModelVersion, PairedModelReport, ReadyEvaluationEndpointBinding } from './types.js'
 
-export function modelEvaluationRequest(spec: ModelTrainingSpec, model: ModelVersion, modelRef: ContentRef, partition: 'dev' | 'held-out'): ModelEvaluationRequest {
+export function modelEvaluationRequest(spec: ModelTrainingSpec, model: ModelVersion, modelRef: ContentRef, partition: 'dev' | 'held-out', binding: ReadyEvaluationEndpointBinding): ModelEvaluationRequest {
   const dataset = partition === 'dev' ? spec.datasets.dev : spec.datasets.heldOut
   const common = spec.evaluation.common
   const condition: ModelEvaluationCondition = {
-    schemaVersion: 1, partition, datasetDigest: dataset.snapshotRef.digest,
+    schemaVersion: 2, partition, datasetDigest: dataset.snapshotRef.digest,
     slots: dataset.tasks.flatMap(task => Array.from({ length: common.attempts }, (_, i) => ({ taskId: task.id, attempt: i + 1, environmentDigest: task.environmentRef.digest }))),
     verifierDigest: spec.verifier.digest, budgetsDigest: common.budgetsDigest, samplingDigest: common.samplingDigest,
     runtimeDigest: common.runtimeDigest, protocolDigest: common.protocolDigest, tokenizerDigest: model.tokenizerDigest,
     chatTemplateDigest: model.chatTemplateDigest, architecture: model.architecture, dtype: model.dtype,
-    ...(spec.schemaVersion === 2 ? { deploymentDigest: digestJson(spec.deployment) } : {}),
-    ...(spec.evaluation.inferencePool ? { inferencePoolDigest: digestJson(spec.evaluation.inferencePool) } : {}),
+    endpointApi: binding.api,
+    ...(spec.schemaVersion === 2 ? { taskExecutionDigest: digestJson(spec.deployment.taskExecution) } : {}),
   }
-  return { schemaVersion: 1, subject: { harnessRef: spec.fixedHarness.manifestRef, modelVersionRef: modelRef, weightsDigest: model.weightsDigest },
+  return { schemaVersion: 2, endpointBinding: structuredClone(binding), subject: { harnessRef: spec.fixedHarness.manifestRef, modelVersionRef: modelRef, weightsDigest: model.weightsDigest },
     model, condition, datasetRef: dataset.snapshotRef, harnessCommit: spec.fixedHarness.commit, harnessAdapter: spec.fixedHarness.adapter,
-    datasetTasks: dataset.tasks, verifierRef: spec.verifier, evaluationDevices: gpuUuids(spec.resources.evaluationDevices),
-    ...(spec.schemaVersion === 2 ? { deployment: spec.deployment } : {}),
-    ...(spec.evaluation.inferencePool ? { inferencePool: structuredClone(spec.evaluation.inferencePool) } : {}) }
+    datasetTasks: dataset.tasks, verifierRef: spec.verifier }
 }
 export const modelEvidenceKey = (request: Pick<ModelEvaluationRequest, 'subject' | 'condition'>): string => digestJson(request)
 const slotKey = (slot: { taskId: string; attempt: number }): string => JSON.stringify([slot.taskId, slot.attempt])
@@ -28,7 +26,11 @@ const slotKey = (slot: { taskId: string; attempt: number }): string => JSON.stri
 export function validateModelEvidence(value: unknown, request?: ModelEvaluationRequest): ModelEvaluationEvidence {
   const e = parseModelEvaluationEvidence(value)
   requireContract(e.evidenceKey === modelEvidenceKey({ subject: e.subject, condition: e.condition }), 'invalid-evidence-key', 'evaluation evidence identity mismatch')
-  if (request) requireContract(e.evidenceKey === modelEvidenceKey({ subject: request.subject, condition: request.condition }), 'evaluation-drift', 'evaluation does not match the frozen subject and common conditions')
+  if (request) {
+    requireContract(e.evidenceKey === modelEvidenceKey({ subject: request.subject, condition: request.condition }), 'evaluation-drift', 'evaluation does not match the frozen subject and common conditions')
+    requireContract(e.schemaVersion === 2 && digestJson(e.endpointBinding) === digestJson(publicEndpointBinding(request.endpointBinding)),
+      'evaluation-binding-drift', 'evaluation did not use its frozen endpoint revision, deployment receipt and generation')
+  }
   const slots = new Set(e.condition.slots.map(slotKey))
   requireContract(slots.size === e.condition.slots.length, 'duplicate-eval-slot', 'evaluation condition has duplicate slots')
   const seen = new Set<string>(); const runs = new Set<string>()

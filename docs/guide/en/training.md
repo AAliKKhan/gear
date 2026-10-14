@@ -43,4 +43,4 @@ GEAR_TRAINING_TEST_PYTHON="$VIRTUAL_ENV/bin/python" npm run test:training
 
 On macOS, omit `--index-url` when installing Torch. CI runs the Python suite in `Training / CPU`.
 
-Independent model-evaluation inference supports explicit TP and replica pools with configurable trial concurrency. See [standalone inference setup and identities](../../training/standalone-inference.md). Training rollout behavior is unchanged.
+Independent evaluation connects to already deployed model endpoints, with a frozen binding and trusted deployment receipt for each immutable HF version. See [endpoint preparation, comparison and acceptance](../../training/standalone-inference.md). Training and inference use statically separate devices; shared inference GPU time remains unknown without a reliable external meter. The new SGLang TP=1, TP=2 and official Gateway paths still require real GPU/Harness acceptance.

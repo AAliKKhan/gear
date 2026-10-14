@@ -38,10 +38,7 @@ export function parseTrainingDeployment(value: unknown): T.TrainingDeploymentCon
   const usedPorts = new Set<number>()
   for (const [name, input] of Object.entries(nodes)) {
     requireContract(id(name), 'invalid-model-node', 'invalid node reference')
-    const runtimeKeys = input && typeof input === 'object' && 'runtime' in input ? ['runtime'] : []
-    const n = object(input, ['transport', 'workspace', 'python', 'configPath', 'gateway', ...runtimeKeys], `nodes.${name}`)
-    requireContract(n.runtime === undefined || ['standalone-v1', 'gear-legacy-v2'].includes(String(n.runtime)),
-      'invalid-node-runtime', 'node runtime must be an explicit supported adapter')
+    const n = object(input, ['transport', 'workspace', 'python', 'configPath', 'gateway'], `nodes.${name}`)
     const transport = n.transport as Record<string, unknown> | null
     object(transport, transport?.type === 'ssh' ? ['type', 'host'] : ['type'], 'node transport')
     requireContract(transport?.type === 'local' || (transport?.type === 'ssh' && id(transport.host)), 'invalid-node-transport', 'use local or an SSH Host alias; SSH credentials stay in user configuration')
@@ -80,21 +77,18 @@ export function parseNodeGpus(value: unknown, nodeId: string): T.NodeGpu[] {
 export function actorRolloutPlacement(input: T.ModelTrainingSpec | T.TrainingRequest): 'separate' | 'colocated' {
   return input.schemaVersion === 2 ? (input.deployment.gpuScheduling.actorRollout === 'colocated' ? 'colocated' : 'separate') : input.trainer.placement ?? 'separate'
 }
-export function trainEvaluationMode(spec: T.ModelTrainingSpec): 'isolated' | 'sequential' {
-  return spec.schemaVersion === 2 ? spec.deployment.gpuScheduling.trainEvaluation : spec.resources.mode
-}
 export function gpuUuids(devices: string[] | T.NodeGpu[]): string[] { return devices.map(d => typeof d === 'string' ? d : d.gpuUuid) }
 
 export interface DeploymentObservation {
   node: T.NodeIdentity & { runtimeDigest: string; gpuUuids: string[]; launchers: ('docker' | 'process')[] }
   provider: { name: string; placement: 'local' | 'remote'; identityDigest: string; capabilitiesDigest: string;
-    capabilities: { harborDocker: boolean; exactTrainingBinding: boolean; managedModelRoute: boolean } }
+    capabilities: { harborDocker: boolean; exactTrainingBinding: boolean; trainingModelRoute: boolean } }
 }
 export function freezeExecutionPlacement(configInput: unknown, observation: DeploymentObservation): T.FrozenExecutionPlacement {
   const config = parseTrainingDeployment(configInput); const provider = observation.provider
   requireContract(provider.name === config.taskExecution.provider && provider.placement === config.taskExecution.placement,
     'provider-placement-mismatch', 'provider observation does not match the selected execution node')
-  for (const key of ['harborDocker', 'exactTrainingBinding', 'managedModelRoute'] as const) {
+  for (const key of ['harborDocker', 'exactTrainingBinding', 'trainingModelRoute'] as const) {
     requireContract(provider.capabilities[key] === true, 'missing-provider-capability', `${provider.name} lacks ${key}`)
   }
   requireContract(observation.node.launchers.includes(config.modelRuntime.launcher), 'missing-model-launcher', 'model node does not support the selected launcher')

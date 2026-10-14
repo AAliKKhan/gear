@@ -20,7 +20,7 @@ class TrainingEntrypoints(unittest.TestCase):
         )
 
     def test_module_help_parses_without_starting_services(self):
-        for module in ("job", "node", "script_job", "inference", "certify"):
+        for module in ("job", "node", "script_job", "certify"):
             with self.subTest(module=module):
                 result = self.command(module, "--help")
                 self.assertEqual(result.returncode, 0, result.stderr)

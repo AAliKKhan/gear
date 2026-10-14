@@ -105,14 +105,14 @@ class PreflightTests(unittest.TestCase):
 
     def test_preflight_rpc_is_pinned_empty_and_does_not_create_a_training_job(self):
         node_config = {"schemaVersion": 2, "nodeId": "gpu", "nodeRoot": str(self.root / "node"), "storeRoot": str(self.store.root),
-                       "jobConfigPath": str(self.root / "job.json"), "inferencePort": 30002}
+                       "jobConfigPath": str(self.root / "job.json")}
         Path(node_config["jobConfigPath"]).write_text(json.dumps(self.config))
         node = NodeService(node_config)
         envelope = {"schemaVersion": 2, "requestId": "preflight-1", "node": node.identity, "operation": "preflight", "payload": {}, "inputDigest": digest_json({})}
         result = node.rpc(envelope)
         self.assertEqual(result["node"], node.identity)
         self.assertEqual(result["result"]["node"], node.identity)
-        self.assertEqual(result["result"]["ports"], {"rollout": 30001, "inference": 30002})
+        self.assertEqual(result["result"]["ports"], {"rollout": 30001})
         self.assertTrue(all(check["status"] == "passed" for check in result["result"]["checks"]))
         self.assertFalse(Path(self.config["jobsRoot"]).exists())
         self.assertFalse((self.root / "node" / "rpc").exists())
@@ -120,7 +120,7 @@ class PreflightTests(unittest.TestCase):
             with self.assertRaises(ContractError): node.rpc(invalid)
 
     def test_invalid_configuration_is_structured_and_cannot_smuggle_controller_dependency(self):
-        node_config = {"jobConfigPath": str(self.root / "job.json"), "storeRoot": str(self.store.root), "inferencePort": 30002}
+        node_config = {"jobConfigPath": str(self.root / "job.json"), "storeRoot": str(self.store.root)}
         Path(node_config["jobConfigPath"]).write_text(json.dumps({**self.config, "hitchCommand": ["secret-command"], "gatewayPort": "secret-port"}))
         report = model_node_preflight(node_config, self.config["node"])
         self.assertEqual(report["checks"][0], {"code": "training-node-configuration", "status": "blocked"})
@@ -138,7 +138,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_missing_jobs_directory_configuration_blocks_before_submission(self):
         config = dict(self.config); config.pop("jobsRoot")
-        node_config = {"jobConfigPath": str(self.root / "job.json"), "storeRoot": str(self.store.root), "inferencePort": 30002}
+        node_config = {"jobConfigPath": str(self.root / "job.json"), "storeRoot": str(self.store.root)}
         Path(node_config["jobConfigPath"]).write_text(json.dumps(config))
         report = model_node_preflight(node_config, self.config["node"])
         self.assertEqual(report["checks"][0]["status"], "blocked")

@@ -62,6 +62,11 @@ def boot_identity():
 class NodeService:
     def __init__(self, config):
         require(
+            "deviceLeaseRuntime" not in config,
+            "removed-device-lease-runtime",
+            "remove deviceLeaseRuntime; Gear training uses its own device ledger and external inference must use statically separate devices",
+        )
+        require(
             config.get("schemaVersion") == 2
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", str(config.get("nodeId", ""))),
             "invalid-node-config",
@@ -222,7 +227,7 @@ class NodeService:
                 "node content must use CAS references",
             )
             result = {"refs": dependency_refs(self.store.read_json(ref))}
-        elif operation.startswith(("training.", "inference.", "scripts.")):
+        elif operation.startswith(("training.", "scripts.")):
             # Mutating calls already have durable job identities. Recording an
             # envelope intent prevents a request ID from acquiring new meaning;
             # replies are live so inspect/cancel never replay stale release data.
@@ -253,17 +258,6 @@ class NodeService:
                     return self.response(
                         envelope, getattr(ScriptService(self.config), action)(payload)
                     )
-                if operation.startswith("inference."):
-                    from gear.training.inference.inference_process import ProcessService
-
-                    service = ProcessService(self.config, self.identity)
-                    action = operation.removeprefix("inference.")
-                    require(
-                        action in ("prepare", "start", "inspect", "attach", "stop", "recover"),
-                        "unknown-node-operation",
-                        "unknown inference operation",
-                    )
-                    return self.response(envelope, getattr(service, action)(payload))
                 from gear.training.runtime.job import JobService
 
                 require(
@@ -282,11 +276,6 @@ class NodeService:
                     **config,
                     "node": self.identity,
                     "nodeRoot": str(self.root),
-                    **(
-                        {"deviceLeaseRuntime": self.config["deviceLeaseRuntime"]}
-                        if "deviceLeaseRuntime" in self.config
-                        else {}
-                    ),
                 }
                 service = JobService(config)
                 action = operation.removeprefix("training.")

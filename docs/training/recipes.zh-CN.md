@@ -1,6 +1,6 @@
 # 版本化 Slime 训练配方与离线 SFT
 
-Gear 的模型训练使用固定 harness、不可变数据和独立 dev/held-out 评估。下面的配方都沿用原来的设备租约、GPU 时间核算、每 update 完整 checkpoint、HF 导出、暂停/恢复、评估与显式发布流程。v1/v2 controller 均可使用。RSI/harness 搜索不会自动启动这些模型更新。
+Gear 的模型训练使用固定 harness、不可变数据和独立 dev/held-out 评估。下面的配方保留训练设备租约、训练 GPU 计量、每 update 完整 checkpoint、HF 导出和暂停/恢复。独立评估采用[按不可变模型版本准备的外部端点](standalone-inference.zh-CN.md)，静态分卡；共享推理 GPU 时间未知时为 null，预算显式覆盖 training。显式发布仅更新批准的制品指针。v1/v2 controller 均可使用。RSI/harness 搜索不会自动启动这些模型更新。
 
 ## 配方与固定上游接口
 

@@ -52,8 +52,8 @@ export async function observeExecutionProvider(input: TrainingDeploymentConfig, 
   const capabilities = { harborDocker: features.docker === true,
     exactTrainingBinding: caps.training_external_binding === '1' && caps.exact_policy_tokens === '1' && caps.training_policy_fencing === '1'
       && (!remote || caps.remote_training_external_binding === '2' && features.training_external_binding === '2'),
-    managedModelRoute: caps.managed_model_node === '2' && features.model_proxy === true
-      && (!remote || caps.remote_managed_model_node === '2' && features.managed_model_node === '2') }
+    trainingModelRoute: features.model_proxy === true && caps.training_external_binding === '1'
+      && (!remote || caps.remote_training_external_binding === '2' && features.training_external_binding === '2') }
   requireContract((remote ? caps.remote_execution_observation === '2' && features.execution_observation === '2' : caps.local_execution_observation === '2'),
     'provider-observation-capability-missing', 'Hitch and the selected worker must support fresh execution environment observation v2')
   const nonce = randomBytes(16).toString('hex')
