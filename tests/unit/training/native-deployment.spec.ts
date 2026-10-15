@@ -77,9 +77,23 @@ describe('managed native preparation protocol', () => {
     context = { experimentId: 'exp-native', controllerDirectory: root, runId: 'run-1', controlSequence: 1, action: 'start', deadlineAt: new Date(Date.now() + 300_000).toISOString() }
   })
   afterEach(async () => { vi.restoreAllMocks(); await rm(root, { recursive: true, force: true }) })
-  function setup() {
+  function setup(ssh = false) {
     const remote = nodeDouble(p), verify = vi.fn(async () => {})
+    if (ssh) remote.transport.connection.transport = { type: 'ssh', host: 'reserved-gpu' }
     return { ...remote, verify, preparer: new ManagedNativeEndpointPreparer(p, { transport: remote.transport, verifyEndpoint: verify, trainingGpuUuids: ['GPU-training'] }) }
+  }
+  function restart(s: ReturnType<typeof setup>) {
+    return new ManagedNativeEndpointPreparer(p, { transport: s.transport, verifyEndpoint: s.verify, trainingGpuUuids: ['GPU-training'] })
+  }
+  function stateFile(preparer: ManagedNativeEndpointPreparer) {
+    return join(root, 'native-deployments', preparer.configurationDigest.slice(7), 'state.json')
+  }
+  async function savedState(preparer: ManagedNativeEndpointPreparer) {
+    return JSON.parse(await readFile(stateFile(preparer), 'utf8')) as { intents: Record<string, any>; history?: Record<string, any> }
+  }
+  function proveDead(s: ReturnType<typeof setup>, incarnation?: string) {
+    const record = incarnation ? s.records.get(incarnation) : [...s.records.values()].at(-1)
+    record.verified = false; record.deathProven = true; record.processState = 'EXITED'
   }
   it('validates frozen devices, executable overrides and public binding fields', () => {
     expect(parseNativeDeploymentProfile(p)).toEqual(p)
@@ -132,6 +146,9 @@ describe('managed native preparation protocol', () => {
     firstRecord.verified = false; firstRecord.deathProven = true; firstRecord.processState = 'EXITED'
     expect(await s.preparer.observe(first, context)).toBeUndefined()
     await s.preparer.retire(first, context)
+    const routeCalls = vi.mocked(s.transport.endpointRoute).mock.calls.length
+    expect(await s.preparer.observe(first, context)).toBeUndefined()
+    expect(s.transport.endpointRoute).toHaveBeenCalledTimes(routeCalls)
     const second = (await s.preparer.prepare(model, ref, context))!
     expect(second.wire_model).not.toBe(first.wire_model); expect(second.connection.auth).not.toEqual(first.connection.auth)
     const records = [...s.records.values()]
@@ -140,6 +157,162 @@ describe('managed native preparation protocol', () => {
     expect(await s.preparer.retire(first, context)).toEqual({ status: 'released' })
     await s.preparer.retire(second, context)
     await expect(s.preparer.prepare(model, ref, context)).rejects.toMatchObject({ code: 'deployment-attempts-exhausted' })
+  })
+  it('recovers a saved ready instance directly through prepare after proven death without an explicit caller retire', async () => {
+    const s = setup(), first = (await s.preparer.prepare(model, ref, context))!
+    const original = [...s.records.values()][0]
+    proveDead(s)
+    const second = await restart(s).prepare(model, ref, context)
+    expect(second).toBeDefined()
+    expect(second!.wire_model).not.toBe(first.wire_model)
+    expect(second!.connection.auth).not.toEqual(first.connection.auth)
+    const replacement = [...s.records.values()][1]
+    expect(replacement.attempt).toBe(2)
+    expect(replacement.hardDeadlineAt).toBe(original.hardDeadlineAt)
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.retire')).toHaveLength(1)
+    proveDead(s)
+    await expect(restart(s).prepare(model, ref, context)).rejects.toMatchObject({ code: 'deployment-attempts-exhausted' })
+  })
+  it('waits for recorded consumers before automatically rebuilding a dead ready instance', async () => {
+    const s = setup(), binding = (await s.preparer.prepare(model, ref, context))!
+    await s.preparer.acquireConsumer(binding, { id: 'in-flight', experimentId: context.experimentId, runId: 'run-1', evaluationKey: 'evaluation' }, context)
+    proveDead(s)
+    expect(await restart(s).prepare(model, ref, context)).toBeUndefined()
+    expect(s.records.size).toBe(1)
+    await s.preparer.releaseConsumer(binding, 'in-flight', context)
+    expect(await restart(s).prepare(model, ref, context)).toBeDefined()
+    expect(s.records.size).toBe(2)
+  })
+  it('continues a persisted draining recovery after the original remote retirement finishes', async () => {
+    const s = setup()
+    await s.preparer.prepare(model, ref, context)
+    proveDead(s)
+    const call = s.call.getMockImplementation()!
+    let draining = true
+    s.call.mockImplementation(async (...args) => {
+      if (args[0] === 'deployment.retire' && draining) {
+        draining = false
+        return { status: 'draining', reason: 'active-consumers' }
+      }
+      return call(...args)
+    })
+    expect(await s.preparer.prepare(model, ref, context)).toBeUndefined()
+    const state = await savedState(s.preparer)
+    expect(Object.values(state.intents)[0].status).toBe('draining')
+    expect(await restart(s).observe(Object.values(state.intents)[0].binding, context)).toBeUndefined()
+    expect(await restart(s).prepare(model, ref, context)).toBeDefined()
+    expect(s.records.size).toBe(2)
+  })
+  it('does not rebuild a ready instance with unknown death or extend an expired recovery budget', async () => {
+    const s = setup()
+    await s.preparer.prepare(model, ref, context)
+    const original = [...s.records.values()][0]
+    original.verified = false; original.processState = 'ABSENT'
+    await expect(restart(s).prepare(model, ref, context)).rejects.toMatchObject({ code: 'deployment-incarnation-lost' })
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.retire')).toHaveLength(0)
+    proveDead(s)
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(original.hardDeadlineAt) - 500)
+    await expect(restart(s).prepare(model, ref, context)).rejects.toMatchObject({ code: 'deployment-deadline-expired' })
+    expect(s.records.size).toBe(1)
+  })
+  it('persists pending route cleanup before opening a managed SSH route', async () => {
+    const s = setup(true)
+    vi.mocked(s.transport.endpointRoute).mockImplementation(async (_directory, route) => {
+      const state = await savedState(s.preparer)
+      const record = Object.values(state.intents).find(r => r.intent.incarnation === route.incarnation)
+      expect(record.routeCleanup).toEqual({ status: 'pending' })
+      return 'http://127.0.0.1:32000'
+    })
+    expect(await s.preparer.prepare(model, ref, context)).toBeDefined()
+  })
+  it('keeps confirmed model release separate from failed SSH cleanup and resumes cleanup after restart', async () => {
+    const s = setup(true), binding = (await s.preparer.prepare(model, ref, context))!
+    vi.mocked(s.transport.closeEndpointRoute).mockRejectedValueOnce(new TrainingContractError('node-route-close-failed', 'reply lost'))
+    expect(await s.preparer.retire(binding, context)).toEqual({ status: 'blocked', reason: 'node-route-close-failed' })
+    let record = Object.values((await savedState(s.preparer)).intents)[0]
+    expect(record.status).toBe('released')
+    expect(record.routeCleanup).toEqual({ status: 'pending', failure: 'node-route-close-failed' })
+    expect(await restart(s).retireOwned(context)).toEqual({ status: 'released' })
+    record = Object.values((await savedState(s.preparer)).intents)[0]
+    expect(record.routeCleanup).toEqual({ status: 'completed' })
+    expect(s.transport.closeEndpointRoute).toHaveBeenCalledTimes(2)
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.retire')).toHaveLength(1)
+  })
+  it('idempotently acknowledges a route already closed before its cleanup reply was lost', async () => {
+    const s = setup(true), binding = (await s.preparer.prepare(model, ref, context))!
+    const incarnation = [...s.records.keys()][0]!, routes = new Set([incarnation])
+    vi.mocked(s.transport.closeEndpointRoute).mockImplementation(async (_directory, route) => {
+      if (routes.delete(route.incarnation)) throw new TrainingContractError('node-route-close-failed', 'closed before disconnect')
+      return { closed: false, reason: 'missing-record' }
+    })
+    expect(await s.preparer.retire(binding, context)).toEqual({ status: 'blocked', reason: 'node-route-close-failed' })
+    expect(routes.size).toBe(0)
+    expect(await restart(s).observe(binding, context)).toBeUndefined()
+    expect(await restart(s).retire(binding, context)).toEqual({ status: 'released' })
+    expect(Object.values((await savedState(s.preparer)).intents)[0].routeCleanup).toEqual({ status: 'completed' })
+    expect(s.transport.closeEndpointRoute).toHaveBeenCalledTimes(2)
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.retire')).toHaveLength(1)
+  })
+  it('serializes a delayed route reopen with retirement so a released binding leaves no connection behind', async () => {
+    const s = setup(true), binding = (await s.preparer.prepare(model, ref, context))!
+    let opened!: () => void, finish!: () => void, routeActive = true
+    const opening = new Promise<void>(resolve => { opened = resolve }), wait = new Promise<void>(resolve => { finish = resolve })
+    vi.mocked(s.transport.endpointRoute).mockImplementation(async () => {
+      opened(); await wait; routeActive = true
+      return 'http://127.0.0.1:32000'
+    })
+    vi.mocked(s.transport.closeEndpointRoute).mockImplementation(async () => { routeActive = false; return { closed: true } })
+    const observing = s.preparer.observe(binding, context)
+    void observing.catch(() => {})
+    await opening
+    const retiring = s.preparer.retire(binding, context)
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (Object.values((await savedState(s.preparer)).intents)[0].status === 'released') break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(Object.values((await savedState(s.preparer)).intents)[0].status).toBe('released')
+    finish()
+    await expect(observing).rejects.toMatchObject({ code: 'deployment-draining' })
+    expect(await retiring).toEqual({ status: 'released' })
+    expect(routeActive).toBe(false)
+    expect(Object.values((await savedState(s.preparer)).intents)[0].routeCleanup).toEqual({ status: 'completed' })
+  })
+  it.each(['current', 'history'] as const)('reconciles legacy released %s records whose route cleanup was never acknowledged', async location => {
+    const s = setup(true), binding = (await s.preparer.prepare(model, ref, context))!
+    await s.preparer.retire(binding, context)
+    const incarnation = [...s.records.keys()][0]!
+    if (location === 'history') await s.preparer.prepare(model, ref, context)
+    const state = await savedState(s.preparer)
+    const record = location === 'history' ? state.history![incarnation] : Object.values(state.intents)[0]
+    delete record.routeCleanup // Simulate old schema after release persisted, before SSH close.
+    await writeFile(stateFile(s.preparer), JSON.stringify(state))
+    vi.mocked(s.transport.closeEndpointRoute).mockClear()
+    expect(await restart(s).retireOwned(context)).toEqual({ status: 'released' })
+    expect(s.transport.closeEndpointRoute).toHaveBeenCalledWith(context.controllerDirectory,
+      expect.objectContaining({ incarnation }))
+    const saved = await savedState(s.preparer)
+    expect((location === 'history' ? saved.history![incarnation] : Object.values(saved.intents)[0]).routeCleanup).toEqual({ status: 'completed' })
+  })
+  it.each(['same-model', 'other-model', 'retireOwned', 'releaseOwnership'] as const)('cannot bypass pending historical route cleanup through %s', async action => {
+    const s = setup(true), first = (await s.preparer.prepare(model, ref, context))!
+    await s.preparer.retire(first, context)
+    const incarnation = [...s.records.keys()][0]!
+    await s.preparer.prepare(model, ref, context)
+    const state = await savedState(s.preparer)
+    state.history![incarnation].routeCleanup = { status: 'pending' }
+    await writeFile(stateFile(s.preparer), JSON.stringify(state))
+    vi.mocked(s.transport.closeEndpointRoute).mockClear().mockRejectedValue(new TrainingContractError('node-route-close-failed', 'retain old route'))
+    const resumed = restart(s), ensureCount = s.call.mock.calls.filter(c => c[0] === 'deployment.ensure').length
+    if (action === 'same-model') expect(await resumed.prepare(model, ref, context)).toBeUndefined()
+    else if (action === 'other-model') {
+      const nextRef = { ...ref, digest: digestJson('other-model') }; nextRef.uri = `cas:${nextRef.digest}`
+      const nextModel = { ...model, id: digestJson('another-model-version'), hfSnapshotRef: nextRef }
+      expect(await resumed.prepare(nextModel, nextRef, context)).toBeUndefined()
+    } else if (action === 'retireOwned') expect(await resumed.retireOwned(context)).toEqual({ status: 'blocked', reason: 'node-route-close-failed' })
+    else expect(await resumed.releaseOwnership(context)).toEqual({ released: false, reason: 'node-route-close-failed' })
+    expect(s.transport.closeEndpointRoute).toHaveBeenCalledWith(context.controllerDirectory, expect.objectContaining({ incarnation }))
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.ensure')).toHaveLength(ensureCount)
+    expect(s.call.mock.calls.filter(c => c[0] === 'deployment.releaseOwnership')).toHaveLength(0)
   })
   it('fences a delayed readiness result after pause without publishing or starting another instance', async () => {
     const s = setup()

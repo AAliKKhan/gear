@@ -21,6 +21,8 @@ interface IntentRecord {
   failure?: string
   consumers: Record<string, { consumer: T.EndpointConsumer; acquiredAt: string; releasedAt?: string }>
   deploymentObserved?: boolean
+  /** Service release and local connection cleanup are independently acknowledged. */
+  routeCleanup?: { status: 'pending' | 'completed'; failure?: string }
 }
 interface NativeState {
   schemaVersion: 1; profileDigest: string; owner: string
@@ -124,11 +126,32 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
     const current = state.intents[target.intentDigest]
     return current?.intent.incarnation === target.incarnation ? current : state.history?.[target.incarnation]
   }
+  private ownedRecords(state: NativeState): IntentRecord[] {
+    const records = new Map<string, IntentRecord>()
+    for (const record of [...Object.values(state.history ?? {}), ...Object.values(state.intents)]) records.set(record.intent.incarnation, record)
+    return [...records.values()]
+  }
+  private routeLock(context: T.EndpointPreparationContext, incarnation: string): string {
+    return join(this.directory(context), 'route-operations', incarnation + '.lock')
+  }
   private authName(intent: NativeIntent): string { return `GEAR_NATIVE_${intent.incarnation.toUpperCase()}` }
   private async binding(intent: NativeIntent, context: T.EndpointPreparationContext): Promise<T.ReadyEvaluationEndpointBinding> {
     const e = this.profile.endpoint
-    const base_url = (await this.options.transport.endpointRoute(context.controllerDirectory,
-      { nodePort: e.nodePort, localPort: e.localPort, incarnation: intent.incarnation })) + '/v1'
+    const target = { intentDigest: intent.intentDigest, incarnation: intent.incarnation }
+    const base_url = await withTrainingFileLock(this.routeLock(context, intent.incarnation), async () => {
+      await this.state(context, state => {
+        const saved = this.findRecord(state, target)
+        requireContract(saved && ['preparing', 'ready'].includes(saved.status), 'deployment-draining', 'retired native instances cannot reopen their route')
+        saved.routeCleanup = { status: 'pending' } // Precedes even an uncertain SSH open.
+      })
+      const url = await this.options.transport.endpointRoute(context.controllerDirectory,
+        { nodePort: e.nodePort, localPort: e.localPort, incarnation: intent.incarnation })
+      await this.state(context, state => {
+        requireContract(['preparing', 'ready'].includes(this.findRecord(state, target)!.status),
+          'deployment-draining', 'native instance retired while its route was being established')
+      })
+      return url + '/v1'
+    })
     const auth = { kind: 'env' as const, name: this.authName(intent) }
     process.env[auth.name] = intent.authKey
     const endpoint_revision = digestJson({ schema_version: '1', base_url, wire_model: intent.wireModel, api: e.api, auth, capabilities: e.capabilities })
@@ -193,18 +216,32 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
         state.intents[intentDigest] = { intent: { intentDigest, modelRef, snapshotRef: model.hfSnapshotRef, runId: context.runId ?? null,
           incarnation, wireModel: `gear-${incarnation}`, authKey: randomBytes(32).toString('hex'), attempt: 1,
           createdAt: new Date(now).toISOString(), startupDeadlineAt: new Date(Math.min(hard, now + this.profile.startupTimeoutSeconds * 1000)).toISOString(),
-          hardDeadlineAt: new Date(hard).toISOString() }, status: 'preparing', consumers: {} }
+          hardDeadlineAt: new Date(hard).toISOString() }, status: 'preparing', consumers: {}, routeCleanup: { status: 'pending' } }
       }
       return state.intents[intentDigest]!
     })
     // Serialize distinct models on one reserved group. Only experiment-owned,
     // positively tracked instances can be drained and retired here.
-    const previous = await this.state(context, state => Object.values(state.intents).filter(r => r.intent.intentDigest !== intentDigest && r.status !== 'released'))
+    if ((await this.reconcileReleasedRoutes(context)).status !== 'released') return undefined
+    const previous = await this.state(context, state => this.ownedRecords(state).filter(r => r.intent.incarnation !== record.intent.incarnation && r.status !== 'released'))
     for (const old of previous) {
       const retired = await this.retireRecord(old, context)
       if (retired.status !== 'released') return undefined
     }
-    if (record.status === 'ready' && record.binding) return this.observe(record.binding, context)
+    if (record.status === 'ready' && record.binding) {
+      const observed = await this.observe(record.binding, context)
+      if (observed) return observed
+      // Only observe's positive death proof authorizes retirement/replacement.
+      // Unknown ownership and network failures throw without creating an attempt.
+      if (Object.values(record.consumers).some(consumer => !consumer.releasedAt)) return undefined
+      if ((await this.retireRecord(record, context)).status !== 'released') return undefined
+      record = await this.state(context, state => state.intents[intentDigest]!)
+    }
+    if (record.status === 'draining' || record.status === 'blocked') {
+      if (Object.values(record.consumers).some(consumer => !consumer.releasedAt)) return undefined
+      if ((await this.retireRecord(record, context)).status !== 'released') return undefined
+      record = await this.state(context, state => state.intents[intentDigest]!)
+    }
     if (record.status === 'released') record = await this.retry(record, context)
     await this.ensureArtifacts(record)
     const deadline = Date.parse(record.intent.startupDeadlineAt)
@@ -272,12 +309,14 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
     const record = await this.state(context, state => this.findRecord(state, target))
     requireContract(record?.intent.incarnation === target.incarnation && record.binding && digestJson(record.binding) === digestJson(binding),
       'deployment-incarnation-lost', 'saved native binding no longer identifies its original private deployment record')
-    this.restoreAuth(record)
+    if (record.status === 'released') return undefined // Historical binding: never reopen its route.
     const observed = await this.observeRecord(record, context)
-    if (!observed.verified && observed.deathProven) return undefined
+    if (observed.released || observed.status === 'released' || !observed.verified && observed.deathProven) return undefined
+    requireContract(record.status === 'ready', 'deployment-draining', 'native instance is retiring and cannot reopen its route')
     requireContract(observed.verified && observed.status === 'ready' && observed.incarnation === target.incarnation
       && observed.snapshotRef?.digest === binding.deployment_receipt.model_digest,
     'deployment-incarnation-lost', 'saved ready binding is a historical observation; the original instance is no longer ready')
+    this.restoreAuth(record)
     await this.binding(record.intent, context) // Reopen only this instance's independently owned SSH route.
     await this.options.verifyEndpoint(binding, Math.max(1, Math.min(60_000, Date.parse(context.deadlineAt) - Date.now())))
     return binding
@@ -307,23 +346,71 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
     await this.call(context, 'releaseConsumer', { ...target, consumer: { id: consumerId }, releasedAt })
   }
   private async retireRecord(record: IntentRecord, context: T.EndpointPreparationContext): Promise<{ status: 'draining' | 'released' | 'blocked'; reason?: string }> {
-    if (record.status === 'released') return { status: 'released' }
+    if (record.status === 'released') return this.cleanupRoute(record, context)
     const target = { intentDigest: record.intent.intentDigest, incarnation: record.intent.incarnation }
     await this.state(context, state => { this.findRecord(state, target)!.status = 'draining' })
+    let result: { status: 'draining' | 'released' | 'blocked'; reason?: string }
     try {
       // Remote retirement persists a negative intent even if an earlier SSH
       // command has not arrived. A mere "absent" read is not a release proof.
-      const result = await this.call(context, 'retire', target, (this.profile.stopTimeoutSeconds + 5) * 1000) as { status: 'draining' | 'released' | 'blocked'; reason?: string }
-      await this.state(context, state => { const saved = this.findRecord(state, target)!; saved.status = result.status; if (result.reason) saved.failure = result.reason })
-      if (result.status === 'released') {
-        await this.options.transport.closeEndpointRoute(context.controllerDirectory, { ...this.profile.endpoint, incarnation: target.incarnation })
-        delete process.env[this.authName(record.intent)]
-      }
-      return result
+      result = await this.call(context, 'retire', target, (this.profile.stopTimeoutSeconds + 5) * 1000) as typeof result
+      await this.state(context, state => {
+        const saved = this.findRecord(state, target)!
+        saved.status = result.status
+        if (result.reason) saved.failure = result.reason
+        else delete saved.failure
+        if (result.status === 'released') saved.routeCleanup ??= { status: 'pending' }
+      })
     } catch (error) {
-      await this.state(context, state => { const saved = this.findRecord(state, target)!; saved.status = 'blocked'; saved.failure = error instanceof TrainingContractError ? error.code : 'native-cleanup-uncertain' })
-      return { status: 'blocked', reason: error instanceof TrainingContractError ? error.code : 'native-cleanup-uncertain' }
+      const reason = error instanceof TrainingContractError ? error.code : 'native-cleanup-uncertain'
+      await this.state(context, state => {
+        const saved = this.findRecord(state, target)!
+        if (saved.status === 'released') saved.routeCleanup = { status: 'pending', failure: reason }
+        else { saved.status = 'blocked'; saved.failure = reason }
+      })
+      return { status: 'blocked', reason }
     }
+    // Local route failures cannot rewrite the acknowledged remote service state.
+    if (result.status === 'released') {
+      const cleanup = await this.cleanupRoute(record, context)
+      if (cleanup.status !== 'released') return cleanup
+    }
+    return result
+  }
+  private async cleanupRoute(record: IntentRecord, context: T.EndpointPreparationContext): Promise<{ status: 'released' | 'blocked'; reason?: string }> {
+    const target = { intentDigest: record.intent.intentDigest, incarnation: record.intent.incarnation }
+    try {
+      return await withTrainingFileLock(this.routeLock(context, target.incarnation), async () => {
+        const completed = await this.state(context, state => {
+          const saved = this.findRecord(state, target)!
+          requireContract(saved.status === 'released', 'native-cleanup-blocked', 'route cleanup requires confirmed release of the original service')
+          if (saved.routeCleanup?.status === 'completed') return true
+          // Old released records without this field have no connection-release
+          // acknowledgement. Treat them exactly like an interrupted cleanup.
+          saved.routeCleanup = { status: 'pending' }
+          return false
+        })
+        if (!completed) {
+          await this.options.transport.closeEndpointRoute(context.controllerDirectory,
+            { nodePort: this.profile.endpoint.nodePort, localPort: this.profile.endpoint.localPort, incarnation: target.incarnation })
+          await this.state(context, state => { this.findRecord(state, target)!.routeCleanup = { status: 'completed' } })
+        }
+        delete process.env[this.authName(record.intent)]
+        return { status: 'released' }
+      })
+    } catch (error) {
+      const reason = error instanceof TrainingContractError ? error.code : 'native-route-cleanup-uncertain'
+      await this.state(context, state => { this.findRecord(state, target)!.routeCleanup = { status: 'pending', failure: reason } })
+      return { status: 'blocked', reason }
+    }
+  }
+  private async reconcileReleasedRoutes(context: T.EndpointPreparationContext): Promise<{ status: 'released' | 'blocked'; reason?: string }> {
+    const pending = await this.state(context, state => this.ownedRecords(state).filter(record => record.status === 'released' && record.routeCleanup?.status !== 'completed'))
+    for (const record of pending) {
+      const result = await this.cleanupRoute(record, context)
+      if (result.status !== 'released') return result
+    }
+    return { status: 'released' }
   }
   async retire(binding: T.ReadyEvaluationEndpointBinding, context: T.EndpointPreparationContext): Promise<{ status: 'draining' | 'released' | 'blocked'; reason?: string }> {
     await this.order(context, false)
@@ -334,7 +421,9 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
   }
   async retireOwned(context: T.EndpointPreparationContext): Promise<{ status: 'draining' | 'released' | 'blocked'; reason?: string }> {
     await this.order(context, false)
-    const records = await this.state(context, state => Object.values(state.intents))
+    const cleanup = await this.reconcileReleasedRoutes(context)
+    if (cleanup.status !== 'released') return cleanup
+    const records = await this.state(context, state => this.ownedRecords(state))
     for (const record of records) {
       const result = await this.retireRecord(record, context)
       if (result.status !== 'released') return result
@@ -343,14 +432,21 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
   }
   async releaseOwnership(context: T.EndpointPreparationContext): Promise<{ released: boolean; reason?: string }> {
     await this.order(context, false)
+    const cleanup = await this.reconcileReleasedRoutes(context)
+    if (cleanup.status !== 'released') return { released: false, reason: cleanup.reason ?? 'native-route-cleanup-uncertain' }
+    const pending = await this.state(context, state => this.ownedRecords(state).some(record => record.status !== 'released'
+      || record.routeCleanup?.status !== 'completed' || Object.values(record.consumers).some(consumer => !consumer.releasedAt)))
+    if (pending) return { released: false, reason: 'owned-deployments-or-consumers-remain' }
     const result = await this.call(context, 'releaseOwnership', {}) as { released: boolean; reason?: string }
     if (result.released) await this.state(context, state => { state.ownershipReleased = true })
     return result
   }
   private async retry(record: IntentRecord, context: T.EndpointPreparationContext): Promise<IntentRecord> {
+    const cleanup = await this.reconcileReleasedRoutes(context)
+    requireContract(cleanup.status === 'released', 'native-cleanup-blocked', 'new native instance requires acknowledged cleanup of all retired routes')
     return this.state(context, state => {
       const current = state.intents[record.intent.intentDigest]!
-      requireContract(current.status === 'released' && Object.values(current.consumers).every(c => !!c.releasedAt),
+      requireContract(current.status === 'released' && current.routeCleanup?.status === 'completed' && Object.values(current.consumers).every(c => !!c.releasedAt),
         'native-cleanup-blocked', 'new incarnation requires proven release and all original consumers completed')
       requireContract(current.intent.attempt < this.profile.maxDeploymentAttempts, 'deployment-attempts-exhausted', 'native deployment exhausted its declared incarnation attempts')
       const original = current.intent
@@ -364,7 +460,7 @@ export class ManagedNativeEndpointPreparer implements T.ModelEndpointPreparer {
       const incarnation = randomUUID().replaceAll('-', '')
       ;(state.history ??= {})[original.incarnation] = structuredClone(current)
       const next: IntentRecord = { intent: { ...original, incarnation, wireModel: `gear-${incarnation}`, authKey: randomBytes(32).toString('hex'),
-        attempt: original.attempt + 1, startupDeadlineAt: new Date(startup).toISOString() }, status: 'preparing', consumers: {} }
+        attempt: original.attempt + 1, startupDeadlineAt: new Date(startup).toISOString() }, status: 'preparing', consumers: {}, routeCleanup: { status: 'pending' } }
       state.intents[original.intentDigest] = next
       return next
     })

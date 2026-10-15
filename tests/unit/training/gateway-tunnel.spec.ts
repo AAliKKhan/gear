@@ -51,7 +51,7 @@ setTimeout(() => process.exit(6), 3000).unref();
     try { return (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error }
   }
-  async function fixture(seed = true) {
+  async function fixture(seed = true, incarnation?: string, localPort = 0) {
     const model = httpServer((_request, response) => response.end('model-service-alive'))
     await listening(model, 0)
     const modelPort = (model.address() as { port: number }).port
@@ -60,17 +60,19 @@ setTimeout(() => process.exit(6), 3000).unref();
       client.pipe(upstream).pipe(client)
       client.on('error', () => upstream.destroy()); upstream.on('error', () => client.destroy())
     })
-    await listening(forward, 0)
+    await listening(forward, localPort)
+    const route = { localPort: (forward.address() as { port: number }).port, nodePort: modelPort }
     const connection: ModelNodeConnection = { transport: { type: 'ssh', host: 'gpu-fixture' }, workspace: '/workspace/frozen',
       python: ['/workspace/python-node'], configPath: '/workspace/node.json',
-      gateway: { localPort: (forward.address() as { port: number }).port, nodePort: modelPort } }
+      gateway: incarnation ? { localPort: 31001, nodePort: 31002 } : route }
     const node: NodeIdentity = { nodeId: 'gpu-fixture', generation: 'boot-1' }
-    const controller = join(root, 'controller'), identity = digestJson({ node, connection })
+    const routeOwner = incarnation ? { node, connection: { ...connection, gateway: route }, namespace: 'evaluation', incarnation } : { node, connection }
+    const controller = join(root, 'controller'), identity = digestJson(routeOwner)
     const directory = join('/tmp', `gear-node-${process.getuid?.() ?? 'user'}-${digestJson(controller).slice(-12)}`)
     directories.add(directory); await mkdir(directory, { recursive: true, mode: 0o700 })
     const socket = join(directory, identity.slice(-20) + '.sock')
-    const record = join(controller, 'node-routes', identity.slice(7) + '.json')
-    const owner = { identity, node, connection }
+    const record = join(controller, incarnation ? 'endpoint-routes' : 'node-routes', identity.slice(7) + '.json')
+    const owner = { identity, ...routeOwner }
     const control = createServer(client => client.once('data', bytes => {
       if (bytes.toString() === 'start') { client.end('ok'); return }
       if (bytes.toString() !== 'exit') { client.end('bad'); return }
@@ -80,7 +82,7 @@ setTimeout(() => process.exit(6), 3000).unref();
     }))
     await listening(control, socket); await chmod(socket, 0o600)
     if (seed) await atomicWrite(record, owner)
-    return { connection, node, controller, directory, socket, record, owner, control, model, forward,
+    return { connection, node, controller, directory, socket, record, owner, control, model, forward, route,
       transport: new ModelNodeTransport(connection, node) }
   }
   it('closes the exact recorded master, releases its port, and leaves the model and another master alive', async () => {
@@ -102,6 +104,20 @@ setTimeout(() => process.exit(6), 3000).unref();
     await expect(lstat(f.record)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await f.transport.closeGateway(f.controller, f.connection.gateway.nodePort)).toEqual({ closed: false, reason: 'missing-record' })
     expect(await commands()).toHaveLength(2)
+  })
+  it('reuses the ordinary endpoint port after cleanup and fences late cleanup of an older incarnation', async () => {
+    const incarnation = 'a'.repeat(32), old = await fixture(false, incarnation)
+    await old.transport.endpointRoute(old.controller, { ...old.route, incarnation })
+    expect(await old.transport.closeEndpointRoute(old.controller, { ...old.route, incarnation })).toEqual({ closed: true })
+    const replacementId = 'b'.repeat(32), replacement = await fixture(false, replacementId, old.route.localPort)
+    const url = await replacement.transport.endpointRoute(replacement.controller, { ...replacement.route, incarnation: replacementId })
+    const before = await commands()
+    expect(await old.transport.closeEndpointRoute(old.controller, { ...old.route, incarnation })).toEqual({ closed: false, reason: 'missing-record' })
+    expect(await commands()).toEqual(before)
+    expect(replacement.control.listening).toBe(true)
+    expect(await (await fetch(url, { headers: { connection: 'close' } })).text()).toBe('model-service-alive')
+    expect(await replacement.transport.closeEndpointRoute(replacement.controller, { ...replacement.route, incarnation: replacementId })).toEqual({ closed: true })
+    expect(old.model.listening).toBe(true); expect(replacement.model.listening).toBe(true)
   })
   it.each(['identity', 'node', 'connection'] as const)('refuses a changed %s before invoking SSH', async field => {
     const f = await fixture()
