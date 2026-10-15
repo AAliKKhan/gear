@@ -75,18 +75,23 @@ const budgets = object({ gpuSecondsScope: optional(literal('training', 'total'))
 const agentStage = object({ runner: str, options: (value, path) => { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(path, 'runner options object'); digestJson(value) },
   instructionsRef: ref, maxRepairs: integer, timeoutSeconds: positive })
 const stages = object({ taskSource: optional(agentStage), datasetBuilder: optional(agentStage) })
+const iteration = object({ schemaVersion: version, maxRounds: positive, maxWallClockSeconds: positive, maxConsecutiveRejected: positive,
+  onRejected: literal('next-declared-proposal-or-stop'), onInconclusive: literal('bounded-repair-or-stop'), autoPublish: literal(false),
+  recovery: object({ maxRunRecoveries: integer, maxEvaluationAttempts: positive }),
+  proposals: array(object({ id: str, sourceRef: ref, trainTaskIds: optional(array(str, 1)), updatesPerCandidate: optional(positive), rolloutSampling: optional(sampling) }), 1) })
+const endpointPreparation = object({ mode: literal('managed-native'), profileDigest: hash })
 const spec = object({ schemaVersion: version, kind: literal('model-training'), name: str, fixedHarness: harness,
   initialModel: ref, referenceModel: ref, stages: optional(stages), datasets: object({ train: partition, dev: partition, heldOut: partition }), verifier: ref, trainer, rollout, offlineTraining: optional(offlineTraining),
   evaluation: object({ provider: literal('hitch-endpoint'), topology: literal('harbor-dataset'),
     common: object({ runtimeDigest: hash, protocolDigest: hash, samplingDigest: hash, budgetsDigest: hash, attempts: positive }),
     policy: object({ minDevGain: nonnegative, maxHeldOutRegression: nonnegative, maxInferenceErrorRate: nonnegative, requiredTaskIds: array(str), maxHeldOutEvaluations: positive }) }),
   resources: object({ trainingDevices: array(str, 1) }), budgets,
-  publication: object({ mode: literal('explicit') }) })
+  publication: object({ mode: literal('explicit') }), iteration: optional(iteration), endpointPreparation: optional(endpointPreparation) })
 const request = object({ schemaVersion: version, trainingRunId: str, experimentId: str, parentModel: model, parentModelRef: ref,
   stages: optional(stages), generatedTaskExclusionRef: optional(ref), behaviorPolicyRef: optional(ref),
   updateStart: optional(object({ mode: literal('cold-start', 'resume'), modelRef: ref, checkpointRef: optional(ref) })),
   referenceModelRef: ref, resumeCheckpointRef: optional(ref), coldStart: bool, fixedHarness: harness, trainDataset: partition, verifier: ref,
-  trainer, rollout, offlineTraining: optional(offlineTraining), budgets, trainingDevices: array(str, 1), recipeDigest: hash, datasetSplitDigest: hash })
+  trainer, rollout, offlineTraining: optional(offlineTraining), budgets, trainingDevices: array(str, 1), recipeDigest: hash, datasetSplitDigest: hash, deadlineAt: optional(timestamp) })
 const handle: Check = (v, p) => {
   const v2 = !!v && typeof v === 'object' && (v as { schemaVersion?: unknown }).schemaVersion === 2
   object({ schemaVersion: literal(v2 ? 2 : 1), provider: literal('slime'), jobId: pattern(/^[a-zA-Z0-9_-]+$/), requestDigest: hash,
@@ -118,6 +123,8 @@ export function parseModelEvaluationEvidence(v: unknown): T.ModelEvaluationEvide
   const nullableSource: Check = (value, path) => { if (value !== null) str(value, path) }
   const result = parse<T.EndpointModelEvaluationEvidence>(object({ schemaVersion: literal(2), evalId: str, subject, condition,
     evidenceKey: hash, endpointBinding: value => { parseEndpointBinding(value) },
+    endpointAttempts: optional(array(object({ id: str, parentId: optional(str), evalId: str,
+      binding: value => { parseEndpointBinding(value) }, trials: array(str) }), 1)),
     trials: array(object({ taskId: str, attempt: positive, runId: str, valid: bool, reward: optional(num), inferenceError: bool })), complete: bool,
     gpuSeconds: nullableNonnegative, gpuSecondsSource: nullableSource,
     usageSource: optional(str), inputTokens: optional(integer), outputTokens: optional(integer), requests: optional(integer), elapsedSeconds: optional(nonnegative),
@@ -230,6 +237,7 @@ export function parseModelTrainingSpec(v: unknown): T.ModelTrainingSpec {
   }
   requireContract(!(v as T.ModelTrainingSpecV1)?.stages, 'agent-controller-required', 'agent stages require v2 controller deployment')
   const result = parseModelTrainingSpecBody(v)
+  requireContract(!result.endpointPreparation, 'managed-endpoint-v2-required', 'managed native deployment requires an explicitly frozen v2 node placement')
   requireContract(result.trainer.runtimeLock.schemaVersion === 1, 'invalid-runtime-placement', 'v1 experiments require the original container runtime lock')
   return result
 }
@@ -268,6 +276,23 @@ function parseModelTrainingSpecBody(v: unknown): T.ModelTrainingSpecV1 {
   const required = result.evaluation.policy.requiredTaskIds
   requireContract(new Set(required).size === required.length && required.every(id => [...result.datasets.dev.tasks, ...result.datasets.heldOut.tasks].some(t => t.id === id)),
     'invalid-required-tasks', 'required tasks must be unique evaluation tasks')
+  if (result.iteration) {
+    const policy = result.iteration
+    requireContract(policy.maxRounds <= 1_000_000 && policy.maxWallClockSeconds <= 366 * 24 * 60 * 60
+      && policy.recovery.maxRunRecoveries <= 100 && policy.recovery.maxEvaluationAttempts <= 100,
+    'invalid-iteration-bound', 'iteration and recovery limits must be finite operational bounds')
+    requireContract(new Set(policy.proposals.map(proposal => proposal.id)).size === policy.proposals.length,
+      'duplicate-proposal', 'each declared proposal needs a distinct identity')
+    for (const proposal of policy.proposals) {
+      requireContract(!proposal.trainTaskIds || new Set(proposal.trainTaskIds).size === proposal.trainTaskIds.length
+        && proposal.trainTaskIds.every(id => result.datasets.train.tasks.some(task => task.id === id)),
+      'invalid-proposal-data', 'proposal data must select unique tasks from the frozen training partition')
+      requireContract(!result.offlineTraining || !proposal.trainTaskIds && !proposal.rolloutSampling,
+        'invalid-offline-proposal', 'SFT proposals may change update count but retain the frozen dataset and cursor')
+      requireContract(!proposal.rolloutSampling || proposal.rolloutSampling.maxNewTokens < proposal.rolloutSampling.maxContextTokens,
+        'invalid-proposal-sampling', 'proposal output budget must leave room for its prompt')
+    }
+  }
   return result
 }
 

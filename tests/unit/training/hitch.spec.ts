@@ -8,6 +8,7 @@ import { digestJson } from '../../../src/training/digest.js'
 import { HitchModelEvaluator } from '../../../src/training/hitch.js'
 import { jsonProcess } from '../../../src/training/process.js'
 import { publicEndpointBinding } from '../../../src/training/endpoint-binding.js'
+import { evaluationAttemptId } from '../../../src/training/evaluation.js'
 import { fixtureEndpointBinding, fixtureGeneration, fixtureServiceConfig } from './fixture.js'
 import type { ModelEvaluationRequest } from '../../../src/training/types.js'
 vi.mock('../../../src/training/process.js', () => ({ jsonProcess: vi.fn() }))
@@ -124,5 +125,60 @@ describe('Hitch evaluator task-only public CLI boundary', () => {
     state.repairReplyLost = false; state.valid = true
     expect((await evaluator.evaluate(request, 'repair')).complete).toBe(true)
     expect(state.submits).toBe(1); expect(state.repairs).toBe(2)
+  })
+  it('freezes a new deployment attempt, keeps reward zero, and reconciles a lost repair reply without changing the root request', async () => {
+    const { evaluator, request, state, root } = await setup()
+    request.condition.slots.push({ ...request.condition.slots[0]!, attempt: 2 })
+    const before = await evaluator.evaluate(request, 'incarnation-repair')
+    expect(before.complete).toBe(false); expect(before.trials[0]!.reward).toBe(0)
+    const changed = structuredClone(request), binding = changed.endpointBinding
+    binding.wire_model = 'new-incarnation'; binding.deployment_receipt.wire_model = binding.wire_model; binding.deployment_receipt.deployment_ref = 'new-incarnation'
+    binding.endpoint_revision = digestJson({ schema_version: '1', ...binding.connection, wire_model: binding.wire_model, api: binding.api, capabilities: binding.capabilities })
+    await expect(evaluator.evaluate(changed, 'incarnation-repair')).rejects.toMatchObject({ code: 'evaluation-attempt-drift' })
+    const parentId = evaluationAttemptId(request.endpointBinding), id = evaluationAttemptId(binding), childRun = `run_${'d'.repeat(32)}`
+    const originalCall = vi.mocked(jsonProcess).getMockImplementation()!
+    let repairCommitted = false, loseReply = true, admissions = 0, pendingReruns = true
+    vi.mocked(jsonProcess).mockImplementation(async (command, args, payload, timeout) => {
+      const argv = args.slice(2), operation = argv.slice(0, 2).join(' ')
+      if (operation === 'capabilities --json') return { ordered_eval_control: '2', endpoint_evaluation_attempts: '1' }
+      if (operation === 'eval rerun') {
+        const file = argv[argv.indexOf('--endpoint-attempt-file') + 1]!
+        expect(JSON.parse(await readFile(file, 'utf8'))).toMatchObject({ id, parent_id: parentId, endpoint_binding: binding })
+        if (!repairCommitted) { repairCommitted = true; admissions++ }
+        if (loseReply) { loseReply = false; throw new TrainingContractError('process-timeout', 'reply lost after completed repair') }
+        return {}
+      }
+      const result = await originalCall(command, args, payload, timeout) as Record<string, any>
+      if (operation === 'eval inspect' && repairCommitted) return { ...result, pending_reruns: pendingReruns, endpoint_attempts: [
+        { id: parentId, endpoint_binding: publicEndpointBinding(request.endpointBinding) },
+        { id, parent_id: parentId, endpoint_binding: publicEndpointBinding(binding), selected_trials: [{ task_id: 'task', attempt: 2 }] }],
+      result: { ...result.result, usage: { requests: 7, input_tokens: 25, output_tokens: 14, source: 'model-interactions-v1' },
+        trials: [...result.result.trials, { task_id: 'task', attempt: 2, run_id: childRun, observation_status: 'valid', reward: 1 }] } }
+      if (operation === 'runs inspect' && argv[2] === childRun) return { ...result, record: { ...result.record, run_id: childRun,
+        parent: { ...result.record.parent, attempt: 2 }, model: { provider: 'external-endpoint', requested_id: binding.endpoint_ref, effective_id: binding.wire_model, endpoint_binding: publicEndpointBinding(binding) },
+        observation: { status: 'valid', reward: 1 } } }
+      return result
+    })
+    const intent = { schemaVersion: 2 as const, sequence: 2, action: 'start' as const }
+    await expect(evaluator.evaluate(changed, 'incarnation-repair', intent, { id, parentId })).rejects.toMatchObject({ code: 'evaluation-pending' })
+    const restored = new HitchModelEvaluator(evaluator.store, evaluator.options)
+    expect(await restored.observeUsage(changed, 'incarnation-repair')).toMatchObject({ requests: 7, inputTokens: 25 })
+    vi.mocked(jsonProcess).mockClear()
+    expect(await restored.reconcileEvidence(changed, 'incarnation-repair')).toBeUndefined()
+    expect(vi.mocked(jsonProcess).mock.calls.every(([, args]) => args.slice(2, 4).join(' ') === 'eval inspect')).toBe(true)
+    pendingReruns = false
+    vi.mocked(jsonProcess).mockClear()
+    const reconciled = await restored.reconcileEvidence(changed, 'incarnation-repair')
+    expect(reconciled?.complete).toBe(true)
+    expect(vi.mocked(jsonProcess).mock.calls.every(([, args]) => ['eval inspect', 'runs inspect', 'verifier inspect'].includes(args.slice(2, 4).join(' ')))).toBe(true)
+    const evidence = await restored.evaluate(changed, 'incarnation-repair', intent, { id, parentId })
+    expect(evidence).toMatchObject({ complete: true, requests: 7, inputTokens: 25, outputTokens: 14 })
+    expect(evidence.trials[0]).toEqual(before.trials[0]); expect(admissions).toBe(1); expect(state.submits).toBe(1)
+    expect(evidence.schemaVersion === 2 && evidence.endpointAttempts?.map(attempt => attempt.id)).toEqual([parentId, id])
+    const directory = join(root, 'eval', 'evaluations', digestJson('incarnation-repair').slice(7))
+    const journal = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8'))
+    expect(journal.requestDigest).toBe(digestJson(request)); expect(journal.request.endpointBinding).toEqual(request.endpointBinding)
+    expect(JSON.parse(await readFile(join(directory, 'attempts', id, 'request.json'), 'utf8'))).toEqual(changed)
+    await expect(restored.evaluate(request, 'incarnation-repair', intent)).rejects.toMatchObject({ code: 'evaluation-attempt-stale' })
   })
 })

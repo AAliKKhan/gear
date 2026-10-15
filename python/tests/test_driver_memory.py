@@ -88,7 +88,14 @@ class DriverMemoryTests(unittest.TestCase):
         if path.name.endswith("-hf"):
             path.mkdir(exist_ok=True)
             atomic_json(path / "config.json", {"model_type": "qwen2"})
+        elif ref == self.state_ref:
+            path.mkdir(exist_ok=True)
+            (path / "latest_checkpointed_iteration.txt").write_text("1")
         return path
+
+    def parse_args(self):
+        self.args.use_checkpoint_opt_param_scheduler = "--use-checkpoint-opt-param-scheduler" in sys.argv
+        return self.args
 
     def run_driver(self):
         atomic_json(self.root / "request.json", self.request)
@@ -96,7 +103,7 @@ class DriverMemoryTests(unittest.TestCase):
         _, values, _ = resource_plan(self.request, HYPERPARAMETERS["slimeArgs"])
         for key, value in values.items(): setattr(self.args, key[2:].replace("-", "_"), value)
         modules = {"ray": self.rt.ray,
-            "slime.utils.arguments": SimpleNamespace(parse_args=lambda: self.args),
+            "slime.utils.arguments": SimpleNamespace(parse_args=self.parse_args),
             "slime.ray.placement_group": SimpleNamespace(create_placement_groups=lambda args: {"rollout": None, "actor": None},
                 create_rollout_manager=self.create_manager, create_training_models=self.create_actor),
             "slime.utils.logging_utils": SimpleNamespace(configure_logger=lambda: None, init_tracking=lambda *a: None, finish_tracking=lambda *a: None)}

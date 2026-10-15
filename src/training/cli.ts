@@ -3,7 +3,7 @@ import { parseScriptControllerConfig, scriptCommand } from './script-controller.
 import { sealScriptSource } from './script-source.js'
 import { readFile } from 'node:fs/promises'
 import { ModelTrainingCoordinator } from './coordinator.js'
-import { HitchModelEvaluator, type HitchModelEvaluatorOptions } from './hitch.js'
+import { HitchModelEvaluator, verifyHitchEndpoint, type HitchModelEvaluatorOptions } from './hitch.js'
 import { HitchModelPublisher } from './publication.js'
 import { jsonProcess } from './process.js'
 import { parseModelTrainingSpec, requireContract } from './schema.js'
@@ -17,6 +17,9 @@ import { preflightDeployment } from './preflight-deployment.js'
 import { digestJson } from './digest.js'
 import { retainContentGraph } from './retention.js'
 import { ExternalFileEndpointPreparer, type ExternalEndpointPreparationConfig } from './endpoint-binding.js'
+import { ManagedNativeEndpointPreparer } from './native-deployment.js'
+import { parseNativeDeploymentProfile, type NativeDeploymentProfile } from './native-deployment-profile.js'
+import { ModelIterationController, runIteration } from './iteration.js'
 import type { ModelTrainingSpec, TrainingDeploymentConfig, ModelNodeConnection, NodeIdentity, ContentRef, ModelTrainingRun } from './types.js'
 
 export interface TrainingControllerConfigV1 {
@@ -35,7 +38,8 @@ export interface TrainingControllerConfigV2 {
   episodeTimeoutSeconds: number
   hitch: HitchModelEvaluatorOptions
   activationPath: string
-  evaluationBindings: ExternalEndpointPreparationConfig
+  evaluationBindings?: ExternalEndpointPreparationConfig
+  managedNative?: NativeDeploymentProfile
 }
 export type TrainingControllerConfig = TrainingControllerConfigV1 | TrainingControllerConfigV2
 
@@ -57,7 +61,11 @@ export function parseTrainingControllerConfig(value: unknown): TrainingControlle
     requireContract(!('modelNode' in config.hitch) && !('deployment' in config.hitch) && !('slime' in config),
       'invalid-controller-config', 'v2 model connection comes from deployment; do not supply legacy Slime or a separate Hitch node override')
   }
-  new ExternalFileEndpointPreparer(config.evaluationBindings)
+  if (config.schemaVersion === 2 && config.managedNative) {
+    requireContract(!config.evaluationBindings, 'ambiguous-endpoint-preparation', 'select managedNative or evaluationBindings')
+    config.managedNative = parseNativeDeploymentProfile(config.managedNative)
+    requireContract(config.deployment.nodes[config.managedNative.nodeRef], 'unknown-model-node', 'managed evaluation profile node is not configured')
+  } else new ExternalFileEndpointPreparer(config.evaluationBindings!)
   return config
 }
 
@@ -83,7 +91,15 @@ export function trainingController(config: TrainingControllerConfig, spec: Model
   const evaluator = new HitchModelEvaluator(store, { ...config.hitch, executionProvider: placement.taskExecution.provider })
   const publisher = new HitchModelPublisher(store, { ...config.hitch, activationPath: config.activationPath, artifactStorage,
     frozenNode: node, modelNode: inferenceConnection })
-  return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, evaluator, new ExternalFileEndpointPreparer(config.evaluationBindings)) }
+  const endpointPreparer = config.managedNative ? new ManagedNativeEndpointPreparer(config.managedNative, {
+    store, sourceTransport: transport,
+    transport: new ModelNodeTransport(config.deployment.nodes[config.managedNative.nodeRef]!, config.managedNative.node),
+    verifyEndpoint: (binding, timeoutMs) => verifyHitchEndpoint(binding, config.hitch, timeoutMs),
+    trainingGpuUuids: spec.resources.trainingDevices.filter(device => device.nodeId === config.managedNative!.node.nodeId).map(device => device.gpuUuid),
+  }) : new ExternalFileEndpointPreparer(config.evaluationBindings!)
+  requireContract(config.managedNative ? spec.endpointPreparation?.profileDigest === endpointPreparer.configurationDigest
+    : !spec.endpointPreparation, 'managed-endpoint-not-authorized', 'controller preparation mode and profile must match the frozen experiment authorization')
+  return { trainer, publisher, coordinator: new ModelTrainingCoordinator(store, trainer, evaluator, endpointPreparer) }
 }
 /** Keep the existing durable coordinator moving; never silently resume a stopped job. */
 export async function runTraining(
@@ -127,12 +143,25 @@ async function runFromCli(coordinator: ModelTrainingCoordinator, experimentId: s
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop) }
 }
 
+async function iterationFromCli(coordinator: ModelTrainingCoordinator, experimentId: string) {
+  const signal = new AbortController(), stop = () => signal.abort()
+  process.once('SIGINT', stop); process.once('SIGTERM', stop)
+  let previous = ''
+  try {
+    return await runIteration(new ModelIterationController(coordinator), experimentId, { signal: signal.signal,
+      onProgress: state => {
+        const progress = JSON.stringify({ experimentId, ...state.iteration })
+        if (progress !== previous) { process.stderr.write(progress + '\n'); previous = progress }
+      } })
+  } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop) }
+}
+
 export async function trainingCommand(argv: string[]): Promise<unknown> {
   const args = [...argv]; const action = args.shift()
   if (action === '--help' || action === 'help') return {
     usage: 'gear training ACTION --config CONTROLLER.json [arguments]',
-    actions: ['node-probe DEPLOYMENT.json NODE_REF', 'preflight-deployment', 'freeze-deployment', 'put-json FILE', 'seal-hf DIRECTORY', 'seal-hf-node NODE_DIRECTORY', 'seal-dataset DIRECTORY', 'seal-sft INPUT.json', 'validate SPEC', 'init SPEC', 'admit EXP', 'preflight EXP RUN',
-      'seal-script SOURCE_DIRECTORY MODULE:FACTORY', 'run SPEC', 'run SCRIPT_ID', 'run EXP RUN', 'advance EXP RUN', 'status EXP [RUN]', 'pause EXP RUN', 'resume EXP RUN', 'close EXP RUN', 'publish EXP', 'rollback EXP RELEASE'],
+    actions: ['node-probe DEPLOYMENT.json NODE_REF', 'preflight-deployment', 'freeze-deployment', 'freeze-evaluation-profile', 'put-json FILE', 'seal-hf DIRECTORY', 'seal-hf-node NODE_DIRECTORY', 'seal-dataset DIRECTORY', 'seal-sft INPUT.json', 'validate SPEC', 'init SPEC', 'admit EXP', 'preflight EXP RUN',
+      'seal-script SOURCE_DIRECTORY MODULE:FACTORY', 'run SPEC', 'iterate SPEC|EXP', 'run SCRIPT_ID', 'run EXP [RUN]', 'advance EXP [RUN]', 'status EXP [RUN]', 'pause EXP [RUN]', 'resume EXP [RUN]', 'close EXP [RUN]', 'publish EXP', 'rollback EXP RELEASE'],
   }
   if (action === 'node-probe') {
     requireContract(args.length === 2, 'usage', 'training node-probe DEPLOYMENT.json NODE_REF')
@@ -146,7 +175,7 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
   const file = args.splice(index, 2)[1]!
   const rawConfig = JSON.parse(await readFile(file, 'utf8'))
   if (rawConfig.kind === 'training-script-controller') return scriptCommand(action!, args, parseScriptControllerConfig(rawConfig))
-  if (args[0]?.startsWith('exp_') && ['status', 'resume', 'advance', 'run', 'pause', 'close', 'admit'].includes(action!)) {
+  if (args[0]?.startsWith('exp_') && ['status', 'resume', 'advance', 'run', 'iterate', 'pause', 'close', 'admit'].includes(action!)) {
     requireContract(typeof rawConfig.storeRoot === 'string' && rawConfig.storeRoot.startsWith('/'), 'invalid-controller-config', 'historical inspection requires an absolute storeRoot')
     const saved = await new ModelTrainingStore(rawConfig.storeRoot).load(args[0])
     if (action === 'status') {
@@ -161,7 +190,7 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
   }
   const config = parseTrainingControllerConfig(rawConfig)
   const scriptId = args.length === 1 && /^script_[a-f0-9]{32}$/.test(args[0]!)
-  const scriptSpec = action === 'run' && args.length === 1 && !scriptId
+  const scriptSpec = action === 'run' && args.length === 1 && !scriptId && !args[0]!.startsWith('exp_')
     && JSON.parse(await readFile(args[0]!, 'utf8')).kind === 'training-script'
   if (scriptId || scriptSpec) {
     requireContract(config.schemaVersion === 2, 'script-controller-version', 'use a v2 controller or a training-script-controller config')
@@ -169,6 +198,10 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
       node: config.deployment.nodes[config.deployment.modelRuntime.nodeRef]! })
   }
   const store = new ModelTrainingStore(config.storeRoot)
+  if (action === 'freeze-evaluation-profile') {
+    requireContract(config.schemaVersion === 2 && config.managedNative && args.length === 0, 'usage', 'freeze-evaluation-profile requires a managedNative v2 controller')
+    return { endpointPreparation: { mode: 'managed-native', profileDigest: digestJson(config.managedNative) } }
+  }
   if (action === 'preflight-deployment') {
     requireContract(config.schemaVersion === 2 && args.length === 0, 'usage', 'preflight-deployment requires a v2 controller config and no positional arguments')
     return preflightDeployment(config)
@@ -227,7 +260,7 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
     requireContract(args.length === 1, 'usage', `training ${action} DIRECTORY --config CONTROLLER.json`)
     return jsonProcess(config.schemaVersion === 1 ? config.slime.python : config.hitch.python, ['-m', 'gear.training.cli.artifacts', action, '--store-root', store.root], { directory: args[0] }, 3_600_000)
   }
-  if (action === 'run' && args.length === 1) {
+  if ((action === 'run' || action === 'iterate') && args.length === 1 && !args[0]!.startsWith('exp_')) {
     const input = JSON.parse(await readFile(args[0]!, 'utf8'))
     // Local source selection is resolved once; only immutable refs enter the experiment.
     if (input.scriptSource) {
@@ -237,8 +270,10 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
       delete input.scriptSource
     }
     const spec = parseModelTrainingSpec(input)
+    requireContract(action !== 'iterate' || spec.iteration, 'iteration-not-authorized', 'iterate requires a frozen iteration policy in the new experiment')
     const { coordinator } = trainingController(config, spec, store)
     const experiment = await coordinator.createExperiment(spec)
+    if (spec.iteration) return iterationFromCli(coordinator, experiment.id)
     const run = await coordinator.admit(experiment.id)
     return runFromCli(coordinator, experiment.id, run.id)
   }
@@ -252,6 +287,13 @@ export async function trainingCommand(argv: string[]): Promise<unknown> {
   requireContract(experimentId, 'usage', 'an experiment ID is required')
   if (action === 'status' && args.length === 0) return store.load(experimentId)
   const { coordinator, trainer, publisher } = trainingController(config, (await store.load(experimentId)).spec, store)
+  if (args.length === 0 && ['iterate', 'run', 'advance', 'pause', 'resume', 'close'].includes(action!)) {
+    const iteration = new ModelIterationController(coordinator)
+    if (action === 'iterate' || action === 'run') return iterationFromCli(coordinator, experimentId)
+    if (action === 'resume') { await iteration.resume(experimentId); return iterationFromCli(coordinator, experimentId) }
+    if (action === 'close') return iteration.stop(experimentId)
+    return iteration[action as 'advance' | 'pause'](experimentId)
+  }
   if (action === 'admit') { requireContract(args.length === 0, 'usage', 'admit accepts only an experiment ID'); return coordinator.admit(experimentId) }
   if (action === 'publish' || action === 'rollback') {
     requireContract(args.length === (action === 'rollback' ? 1 : 0) && !!config.activationPath, 'usage', 'publish EXP or rollback EXP RELEASE requires activationPath')

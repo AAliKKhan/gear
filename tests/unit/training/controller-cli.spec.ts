@@ -121,7 +121,7 @@ describe('versioned public training controller', () => {
   })
   it('preserves the v1 controller adapter and its original spec digest', () => {
     const original = digestJson(legacy)
-    const v1 = { schemaVersion: 1 as const, storeRoot: root, activationPath: config.activationPath, hitch: config.hitch, evaluationBindings: config.evaluationBindings,
+    const v1 = { schemaVersion: 1 as const, storeRoot: root, activationPath: config.activationPath, hitch: config.hitch, evaluationBindings: config.evaluationBindings!,
       slime: { python: ['local-python'], configPath: '/local/slime.json' } }
     expect(trainingController(parseTrainingControllerConfig(v1), legacy).trainer).toBeInstanceOf(SlimeModelTrainer)
     expect(digestJson(legacy)).toBe(original)

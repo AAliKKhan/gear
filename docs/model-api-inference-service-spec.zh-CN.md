@@ -213,13 +213,17 @@ baseline 在训练前需要评测时也走相同准备逻辑。新 candidate 未
 
 部署准备位于 evaluator 之外，复用 coordinator、事务与 journal。以模型产物及部署配置确定可重入的准备意图，持久化部署引用、绑定和就绪结果。崩溃后协调同一意图；评测重试不重复部署，也不偷偷创建新服务。
 
-首版已实现外部文件映射：controller 的 `evaluationBindings.bindingsFile` 按 `model.hfSnapshotRef.digest` 查找 ready binding，`trustedReceiptSources` 限定回执来源。缺少映射或文件时保存 `endpointPreparations.status="waiting"` 并报告 `waiting-for-deployment`；补齐外部产物后继续同一运行。本次没有实现自动候选部署，不把等待人工或外部流水线准备标为自动化。无需新增常驻 Python worker、部署 daemon 或通用调度器。
+保留外部文件映射：controller 的 `evaluationBindings.bindingsFile` 按 `model.hfSnapshotRef.digest` 查找 ready binding，`trustedReceiptSources` 限定回执来源。缺少映射或文件时保存 `endpointPreparations.status="waiting"` 并报告 `waiting-for-deployment`，补齐外部产物后继续同一运行。已有实验不会自动获得启动服务的权限。
+
+新建 v2 实验可显式冻结 `endpointPreparation={mode:"managed-native",profileDigest:...}`，controller 选择相同摘要的 `managedNative` profile。首个原生后端通过已有节点 RPC 调用 Supervisor 4.3.0；节点私有配置必须固定同一 profile，训练与评测 GPU 静态分开，GPU 节点无需 Docker。Gear 先保存部署 intent、控制序号和原始期限，再核验 CAS 闭包、只读 materialization、实际运行命令与环境/设备/进程组身份，并调用 Hitch 的真实文本、SSE 与完整工具往返验证后形成回执和 ready binding。具体配置、三种控制端位置和软件/实机验收边界见[受管原生部署指南](training/managed-native.zh-CN.md)。不新增推理引擎、部署 daemon 或 GPU 调度器。
+
+保存的 ready binding 每次使用前重新观察原 incarnation 与连接。SSH 启动回执丢失先协调原 intent，暂停用更高序号拒绝迟到启动。实例更换时使用新的 wire model、认证引用和显式评测 attempt；先确认旧任务/请求结束和消费释放，不在原 journal 中替换 binding。重建与冷启动重试都受原始总期限及尝试上限约束，不能透明重放有效失败的 trial。
 
 候选部署不等于正式发布。评测准备不得调用 `HitchModelPublisher.activate()` 提前晋升候选。HF 导出、tokenizer/template 校验与不可变模型制品流程继续复用。
 
 ### 7.3 资源与取消
 
-首版静态划分训练卡和推理卡，并在实际执行环境限制各自可访问的设备。共享模型服务由部署所有者管理，单个 eval 无权停止服务。
+首版静态划分训练卡和推理卡，并在实际执行环境限制各自可访问的设备。共享模型服务由部署所有者管理，单个 eval 无权停止服务。受管实验服务先原子关闭新 consumer admission，只有全部已登记 consumer 终止后才通过 Supervisor 停止精确自属进程组，核验子进程和 GPU 自属计算进程消失后标为 released；外部长驻端点继续由外部所有者管理。未知身份或停止失败保留 blocked 诊断。控制端离线的最终期限由 GNU timeout 对自属组强制执行，期限触发记为失败，不能称为优雅完成。
 
 将现有 `resourcesReleased` 的混合含义拆开：evaluator 返回自身任务及请求是否结束，训练后端报告训练资源释放，部署/资源管理者报告推理资源释放。具体字段命名遵循仓库风格，但类型与状态机必须区分这三种事实。评测完成和暂停不能因为共享服务仍占 GPU 而一直等待，也不能将任务结束伪造成物理释放。
 

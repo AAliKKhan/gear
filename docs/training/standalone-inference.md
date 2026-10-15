@@ -33,7 +33,7 @@ hitch models inspect endpoint/baseline-001 --verify --json
 
 ## Prepare a binding for each immutable HF version
 
-Both v1 and v2 controllers require this private configuration:
+The external-file mode uses this private configuration in v1/v2 controllers. New v2 experiments can explicitly freeze a [managed native profile](managed-native.zh-CN.md); see the [unattended iteration guide](unattended-iteration.zh-CN.md) for automatic rounds.
 
 ```json
 {
@@ -100,7 +100,7 @@ These placeholders must be replaced with actual digests. Copy the editable [read
 
 The machine-readable contract is [ready-evaluation-endpoint-binding-v1.schema.json](../schemas/ready-evaluation-endpoint-binding-v1.schema.json). Copy only the required binding fields from inspection; omit diagnostic `identity_verified`/`verification` fields. The normalized connection, API, model name, auth reference and capabilities must match the registered revision. Receipt `model_digest` must match the requested model's existing HF snapshot digest, and its `wire_model` must match the binding. The deployment workflow must verify the mounted immutable snapshot and receipt provenance. A self-written digest, source string or `/models` echo is not loading proof. Keep credentials and connection URLs outside public receipt `service_config` and public evaluation evidence.
 
-The built-in preparer reads these external files; it does not automatically deploy. A missing map entry or ready file persists `endpointPreparations.status="waiting"` and reports `waiting-for-deployment`. Supply the corresponding version's binding, then continue the same run. Gear saves the preparation intent and ready binding before submitting evaluation and reuses them after a crash. An evaluation retry does not redeploy, re-resolve a mutable alias, or publish the candidate. Different versions may use independent endpoints or different fixed model names; they need not all remain resident simultaneously.
+The external-file preparer reads these files without deployment authority. A missing map entry or ready file persists `endpointPreparations.status="waiting"` and reports `waiting-for-deployment`. Supply the corresponding version's binding, then continue the same run. Gear saves the preparation intent and ready binding before submitting evaluation and reuses them after a crash. Retries do not re-resolve mutable aliases or publish candidates. Explicit managed-native mode can prepare owned services; a rebuilt incarnation requires a bounded new endpoint attempt retaining the original binding and all valid slots. Existing external experiments gain no authority from controller edits. Different versions need not remain resident simultaneously.
 
 ## Freeze comparison conditions and task concurrency
 

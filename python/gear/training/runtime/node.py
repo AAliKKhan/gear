@@ -172,6 +172,7 @@ class NodeService:
                 "episodeJournal": True,
                 "orderedTrainingControl": True,
                 "remoteCasRetention": True,
+                "managedNativeDeployment": "1",
             },
         }
 
@@ -227,6 +228,12 @@ class NodeService:
                 "node content must use CAS references",
             )
             result = {"refs": dependency_refs(self.store.read_json(ref))}
+        elif operation.startswith("deployment."):
+            from gear.training.runtime.native_deployment import NativeDeploymentService
+
+            result = NativeDeploymentService(
+                self.config, self.identity, self.store, payload
+            ).execute(operation.removeprefix("deployment."))
         elif operation.startswith(("training.", "scripts.")):
             # Mutating calls already have durable job identities. Recording an
             # envelope intent prevents a request ID from acquiring new meaning;

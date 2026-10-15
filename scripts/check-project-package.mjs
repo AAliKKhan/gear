@@ -31,7 +31,7 @@ try {
   const isolatedPython = join(environment, 'bin/python')
   run(isolatedPython, ['-m', 'pip', 'install', join(wheels, readdirSync(wheels).find(name => name.endsWith('.whl')))])
   run(isolatedPython, ['-c', 'import sys;import gear;import gear.training;import gear.benchmark.probe;import importlib;import importlib.util;assert all(importlib.util.find_spec(name) is None for name in ("gear_training","gear.training.cli.launch","gear.training.cli.__main__","gear.training.cli.inference","gear.training.inference.inference_process","gear.training.inference.inference_attach","gear.training.inference.inference_recovery","gear.algorithms.history","gear.algorithms.gates","gear.algorithms.observations","gear.algorithms._retired","retired_policies"));[importlib.import_module("gear.training.cli."+name) for name in ("controller","job","node","script_job","certify","slime","gpu_inventory")];assert not any(n in sys.modules for n in ("torch","slime","transformers","aiohttp"));from gear.algorithms import GEPA;from gear.algorithms.testkit import toy_round;assert toy_round(GEPA())["status"] == "passed"'], { cwd: root, env: { ...process.env, PYTHONPATH: '' } })
-  for (const module of ['gear.training', 'gear.training.cli.node', 'gear.training.cli.job'])
+  for (const module of ['gear.training', 'gear.training.cli.node', 'gear.training.cli.job', 'gear.training.cli.native_deployment'])
     assert.match(run(isolatedPython, ['-m', module, '--help'], { cwd: root, env: { ...process.env, PYTHONPATH: '' } }), /usage:/)
   cpSync(join(source, 'examples/training-loop/linear_cpu.py'), join(root, 'linear_cpu.py'))
   run(isolatedPython, [join(root, 'linear_cpu.py'), '--workspace', join(root, 'training')], { cwd: root, env: { ...process.env, PYTHONPATH: '' } })

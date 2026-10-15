@@ -2,6 +2,8 @@
 
 v2 的配方与离线 SFT 使用方法见 [版本化配方指南](recipes.zh-CN.md)。SFT 训练采用 actor-only GPU 分配，独立评估仍沿用本文部署。
 
+新建实验还可显式选择[受管原生候选部署](managed-native.zh-CN.md)和[无人值守多轮迭代](unattended-iteration.zh-CN.md)。下方 `evaluationBindings` 示例说明 external-file 模式；已有实验不会因 controller 配置变化自动获得部署授权。
+
 v2 将任务执行留在控制端，把训练交给固定身份的模型节点；独立评估连接部署所有者准备的外部模型端点。本文说明配置与恢复合同；正式实机认证范围见 [单卡认证记录](https://github.com/rsi-gear/gear/tree/b1baa88799771cafde5ec9704291e5dc2f25a601/docs/training/certifications/2026-09-10-rtx5090-single-gpu)。另有 [2026-10-15 双卡推理记录](../validation/external-inference-gpu-2026-10-15.md)及[静态分卡训练/端点评测诊断](../validation/training-gpu-loop-2026-10-15.md)，覆盖本机 Harbor / Docker、远程训练节点的一次真实更新与 native/HF 导出、普通端点基线/candidate 配对；后者仍为 `validated:false` / `pending-gpu`，reward/loss/grad norm 为 0，不构成学习提升或正式认证。完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认，远程 Harbor worker 与完整 benchmark 未验收。
 
 ## 控制端
@@ -45,7 +47,7 @@ Gear、Hitch、任务快照与 canonical/verifier 证据保留在控制端。控
 }
 ```
 
-`deployment.nodes.gpu.gateway` 只承载训练生成，本机 transport 的 localPort/nodePort 必须相同。独立评估连接来自 evaluationBindings 的冻结 ready 文件；controller 不为普通评估启动服务、选择 GPU 或创建隧道。推理端点的实际网络与凭据由部署/执行环境准备。
+`deployment.nodes.gpu.gateway` 只承载训练生成，本机 transport 的 localPort/nodePort 必须相同。external-file 模式的独立评估连接来自 evaluationBindings 的冻结 ready 文件，controller 不启动或回收外部长驻服务，其网络与凭据由部署环境准备。显式授权的 managedNative 模式使用私有 profile 固定评测 GPU、Supervisor 和独立普通模型隧道；具体配置及准备/观察/消费/释放合同见[受管原生部署](managed-native.zh-CN.md)。
 
 SSH 配置默认使用 `artifactStorage="model-node"`，训练权重和 optimizer/checkpoint 留在远端 CAS。控制端收集有界元数据和持久化回执，并独立核验自己保管的任务/verifier 依赖。候选评估取得匹配 HF snapshot 的可信部署回执和端点绑定；显式发布使用保留的 Gear CAS 制品传输与 Hitch 本地模型导入，见文末。
 
@@ -162,7 +164,7 @@ daemon 经当前 worker bearer/generation 通道发出短期 challenge，包含�
 
 v1/v2 controller 的 `evaluationBindings` 指向按不可变 HF snapshot digest 索引的外部 ready 文件。完整映射、binding、可信部署回执和公共比较 digest 见[独立评测端点](standalone-inference.zh-CN.md)。需要先为 baseline 准备自己的版本绑定；新 candidate 导出后等待自己的绑定，不使用旧模型顶替。
 
-缺少绑定时状态保留为 running，并持久化 waiting-for-deployment / endpointPreparations 等待记录；补齐外部产物后继续同一运行。提交前保存部署准备意图与冻结绑定，恢复与评估重试复用原记录；preparer 不自动启动引擎，不提前调用 publish。Hitch daemon 重启、任务取消或超时均不改变外部模型服务的生命周期。
+external-file 缺少绑定时状态保留为 running，并持久化 waiting-for-deployment / endpointPreparations 等待记录；补齐外部产物后继续同一运行。该模式提交前保存准备意图与冻结绑定，preparer 不自动启动引擎，不提前调用 publish。Hitch daemon 重启、任务取消或超时均不改变外部模型服务的生命周期。managedNative 的所有权、显式跨实例 attempt 与实验级暂停/恢复单独遵循[无人值守迭代指南](unattended-iteration.zh-CN.md)，不会静默改写已有 external-file 实验。
 
 ## 显式发布与回滚
 

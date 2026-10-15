@@ -51,6 +51,12 @@ RESERVED = {
     "--no-load-optim",
     "--no-load-rng",
     "--finetune",
+    "--reset-optimizer-states",
+    "--override-opt-param-scheduler",
+    "--use-checkpoint-opt-param-scheduler",
+    "--ckpt-step",
+    "--pretrained-checkpoint",
+    "--use-stateless-adam",
     "--debug-train-only",
     "--debug-rollout-only",
     "--load-debug-rollout-data",
@@ -95,7 +101,7 @@ RESERVED.update(
 )
 
 
-def build_argv(request, hyperparameters, paths, start_update):
+def build_argv(request, hyperparameters, paths, start_update, *, native_resume=False):
     args = hyperparameters.get("slimeArgs")
     require(
         hyperparameters.get("schemaVersion") == 1
@@ -216,9 +222,37 @@ def build_argv(request, hyperparameters, paths, start_update):
         *args,
         *memory,
         *extra,
+        *(
+            ["--use-checkpoint-opt-param-scheduler"]
+            if native_resume or request.get("resumeCheckpointRef")
+            else []
+        ),
         *([] if offline else ["--use-rollout-logprobs"]),
         *(item for key, value in fixed.items() for item in (key, str(value))),
     ]
+
+
+def validate_native_resume(args, load_path, resuming):
+    require(
+        not any(
+            getattr(args, name, False)
+            for name in (
+                "reset_optimizer_states",
+                "override_opt_param_scheduler",
+                "use_stateless_adam",
+                *(("no_load_optim", "no_load_rng", "finetune") if resuming else ()),
+            )
+        ),
+        "optimizer-reset",
+        "training must retain optimizer, scheduler and RNG state",
+    )
+    if resuming:
+        require(
+            getattr(args, "use_checkpoint_opt_param_scheduler", False)
+            and (Path(load_path) / "latest_checkpointed_iteration.txt").is_file(),
+            "incomplete-native-resume",
+            "resume requires the complete Megatron checkpoint and its saved scheduler parameters",
+        )
 
 
 def export_committed_actor(
@@ -864,6 +898,7 @@ def run(job_dir):
         store.read_json(request["trainer"]["hyperparametersRef"]),
         paths,
         parent_start,
+        native_resume=bool(resume_ref or pending),
     )
     argv[argv.index("--start-rollout-id") + 1] = str(
         pending["committedUpdate"] if pending else start
@@ -882,6 +917,7 @@ def run(job_dir):
     import ray
 
     args = parse_args()
+    validate_native_resume(args, load, bool(resume_ref or pending))
     from gear.training.recipes.agent_grpo import validate_layout
 
     validate_layout(args, request)

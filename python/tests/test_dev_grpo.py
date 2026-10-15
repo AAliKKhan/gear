@@ -118,7 +118,7 @@ class DevGRPOTests(unittest.TestCase):
         atomic_json(self.d.root / "request.json", self.d.request); atomic_json(self.d.root / "config.json", self.config)
         _, values, _ = resource_plan(self.d.request, HYPERPARAMETERS["slimeArgs"])
         for key, value in values.items(): setattr(self.d.args, key[2:].replace("-", "_"), value)
-        modules = {"ray": self.d.rt.ray, "slime.utils.arguments": SimpleNamespace(parse_args=lambda: self.d.args),
+        modules = {"ray": self.d.rt.ray, "slime.utils.arguments": SimpleNamespace(parse_args=self.d.parse_args),
             "slime.ray.placement_group": SimpleNamespace(create_placement_groups=lambda args: {"rollout": None, "actor": None},
                 create_rollout_manager=self.d.create_manager, create_training_models=self.d.create_actor),
             "slime.utils.logging_utils": SimpleNamespace(configure_logger=lambda: None, init_tracking=lambda *args: None, finish_tracking=lambda *args: None),

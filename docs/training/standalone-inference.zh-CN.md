@@ -17,7 +17,7 @@ hitch models inspect endpoint/baseline-001 --verify --json
 
 ## 按不可变模型版本准备绑定
 
-v1/v2 controller 均配置私有 `evaluationBindings`：
+external-file 模式的 v1/v2 controller 配置私有 `evaluationBindings`；v2 新实验也可显式冻结[managedNative 原生部署](managed-native.zh-CN.md)，自动多轮入口见[迭代指南](unattended-iteration.zh-CN.md)。以下为 external-file 配置：
 
 ```json
 {
@@ -34,7 +34,7 @@ v1/v2 controller 均配置私有 `evaluationBindings`：
 
 回执必须含 `schema_version="1"`、`model_digest`、`wire_model`、`deployment_ref`、`source`、`service_config`。其中 model digest 等于待评 HF snapshot，wire model 等于绑定，source 属于 controller 的可信来源。部署流程需要实际核对不可变挂载及回执来源；自填 source、digest 或 `/models` 回显不能代替加载证明。公开 `service_config` 记录 engine/version/digest、量化、工具/推理解析器、tokenizer/template digest、缓存与隔离条件，不能包含连接 URL、认证或 secret。
 
-首版内置 preparer 读取外部文件，不自动部署。缺少映射或 ready 文件时持久化 `endpointPreparations.status="waiting"` 并报告 `waiting-for-deployment`；补齐该模型版本的绑定后继续同一运行。提交 eval 前保存部署准备意图和冻结绑定，崩溃后复用；重试不重新部署、不重新解析可变别名、不提前发布 candidate。不同版本可用独立端点或固定模型名，不要求全部同时常驻显存。
+external-file preparer 读取外部文件，不自动部署。缺少映射或 ready 文件时持久化 `endpointPreparations.status="waiting"` 并报告 `waiting-for-deployment`；补齐该模型版本的绑定后继续同一运行。提交 eval 前保存准备意图和冻结绑定，崩溃后复用；重试不重新解析可变别名、不提前发布 candidate。不同版本可用独立端点或固定模型名，不要求全部同时常驻显存。managedNative 可自动准备自属服务，重建实例时通过有界显式 attempt 保留原绑定与有效槽位；外部长驻端点仍没有 Gear 启停权。
 
 ## 公共比较条件与并发
 

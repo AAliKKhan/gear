@@ -23,11 +23,15 @@ Gear 的模型训练独立于 harness 进化状态，通过固定 harness 和数
 
 `advance` 执行一轮可重复的协调，不是后台定时器。调用方应间隔数秒重复调用，直到 `execution=completed` 或需要处理 `blocked/failed`。Slime 作业和 Hitch eval 自己在后台运行；退出 Gear CLI 不会重新提交或隐式取消任务。使用 `pause` 请求取消，并继续调用直到 `paused`；`resume` 使用原 job 和 idempotency key。
 
+新建自动实验可使用 `gear training iterate SPEC --config CONTROLLER` 一次启动多轮，随后用 `iterate EXP` 协调原持久意图、`pause EXP`/`resume EXP` 控制整个实验。需在创建时冻结 iteration 策略、全实验训练 schedule 和受管 profile 授权；原单轮实验不会自动升级。配置工具、恢复限制和后续真实验收见[无人值守迭代](unattended-iteration.zh-CN.md)。
+
 ## 边界与身份
 
 训练使用固定的 `training-tool` harness：单条线性 Chat Completions 工具轨迹，只允许容器内 bash 工具；无 compaction、分支、subagent、辅助模型或隐藏重试。训练和 dev/held-out 使用同一已提交的 runner 和 artifact。Hitch 的 Codex / Responses 路径继续独立使用。
 
 Slime 管理训练 SGLang。独立评估连接由部署所有者准备的不可变 HF 模型端点，上游 SGLang/官方 Gateway 管理模型副本与服务恢复；Hitch 只管理任务和请求。训练 actor/rollout 可使用独立 GPU 或训练内部 CPU offload 共卡，普通评测首版与训练静态分卡。新 resources 只列 trainingDevices，v2 的 trainEvaluation 设为 isolated；推理卡在外部部署分配中保留，限制训练进程的实际设备访问。完整接入与按版本绑定见[独立评测端点](standalone-inference.zh-CN.md)。
+
+端点准备可保留 external-file 外部映射，也可在新 v2 实验显式选择[managedNative](managed-native.zh-CN.md)：Gear 的部署适配器调用 Supervisor、核验快照与真实进程、登记消费者并回收自属服务。Hitch 仍只接收普通冻结 API binding，不获得模型启停权；外部长驻端点不进入实验自动回收。
 
 每次生成都保存原始 native 输入/输出 token IDs、生成时 weight_version、behavior logprobs、采样参数及请求/响应。工具观察的 loss mask 和 logprob 为 0；模型 token 才参与 loss。prefix 不连续、length/abort、缺少 terminal、verifier 无效或版本漂移会拒绝整个 episode/group。有效 reward=0 保留。凑不满完整 B×G batch 时明确 no-update，不将空/不足 batch 交给 Slime。
 

@@ -10,9 +10,11 @@ import { jsonProcess } from './process.js'
 import { TrainingContractError, requireContract } from './schema.js'
 import { atomicWrite, TrainingContentStore, withTrainingFileLock } from './store.js'
 import { controlEvaluation, type OrderedEvaluationControl } from './hitch-control.js'
+import { assertHitchAttempt, freezeHitchAttempt, hitchEndpointAttempt, publicHitchAttempts, readHitchEvalJournal, type HitchEvalJournal, type HitchAttemptJournal } from './hitch-attempts.js'
 import type { ContentRef, EndpointModelEvaluationEvidence, EvaluationUsage, ModelEvaluationEvidence, ModelEvaluationRequest, ModelEvaluator, TrainingControlIntent } from './types.js'
 
 type Json = Record<string, unknown>
+export { verifyHitchEndpoint } from './hitch-endpoint.js'
 const object = (value: unknown): Json => { requireContract(!!value && typeof value === 'object' && !Array.isArray(value), 'invalid-hitch-evidence', 'expected structured Hitch evidence'); return value as Json }
 const array = (value: unknown): unknown[] => { requireContract(Array.isArray(value), 'invalid-hitch-evidence', 'expected an evidence array'); return value }
 const string = (value: unknown): string => { requireContract(typeof value === 'string' && value.length > 0, 'invalid-hitch-evidence', 'expected an evidence identity'); return value }
@@ -27,10 +29,6 @@ export interface HitchModelEvaluatorOptions {
   python: string[]
   executionProvider?: string
   budgets: { timeoutSeconds: number; setupTimeoutSeconds: number; maxConcurrent: number; maxEpisodeSteps: 16; infrastructureRetries: 0; maxRepairRounds: number }
-}
-interface EvalJournal {
-  key: string; requestDigest: string; startedAt: number; evalId?: string; submitted?: boolean; evidence?: EndpointModelEvaluationEvidence
-  repairRounds?: number; repair?: { id: string; pending: boolean }; retainedTrials?: ModelEvaluationEvidence['trials']
 }
 
 /** An evaluator owns task requests, never the endpoint or its physical resources. */
@@ -49,10 +47,6 @@ export class HitchModelEvaluator implements ModelEvaluator {
     await jsonProcess(this.options.python, ['-m', 'gear.training.cli.artifacts', 'materialize', '--store-root', this.store.root], { ref, destination }, 3_600_000)
     return datasetDestination(await this.store.readJson(ref), destination)
   }
-  private assertJournal(journal: EvalJournal, request: ModelEvaluationRequest): void {
-    requireContract(journal.requestDigest === digestJson(request) && journal.key === modelEvidenceKey({ subject: request.subject, condition: request.condition }),
-      'evaluation-idempotency-conflict', 'evaluation request differs from the frozen binding, subject or conditions')
-  }
   private usage(result?: Json, startedAt?: number): EvaluationUsage {
     const usage: EvaluationUsage = unknownGpuUsage()
     if (startedAt !== undefined) usage.elapsedSeconds = Math.max(0, (Date.now() - startedAt) / 1000)
@@ -67,13 +61,37 @@ export class HitchModelEvaluator implements ModelEvaluator {
     }
     return usage
   }
+  /** Reconcile canonical terminal evidence without touching the endpoint or admitting work. */
+  async reconcileEvidence(request: ModelEvaluationRequest, key: string): Promise<ModelEvaluationEvidence | undefined> {
+    return withTrainingFileLock(join(this.directory(key), 'operation.lock'), async () => {
+      let journal = await readHitchEvalJournal(this.directory(key))
+      if (!journal?.evalId) return undefined
+      assertHitchAttempt(journal, request)
+      if (!journal.attempts) journal = (await freezeHitchAttempt(this.directory(key), request)).journal
+      const attempt = journal.attempts!.at(-1)!
+      requireContract(attempt.requestDigest === digestJson(request), 'evaluation-attempt-stale', 'terminal evidence must reconcile the current frozen attempt')
+      let inspection: Json
+      try { inspection = object(await this.call(['eval', 'inspect', journal.evalId!, '--json'])) }
+      catch (error) { if (error instanceof TrainingContractError && error.code === 'eval_not_found') return undefined; throw error }
+      const result = inspection.result ? object(inspection.result) : undefined
+      if (!result || result.task_completed !== true || inspection.pending_reruns !== false
+        || !['succeeded', 'failed', 'cancelled', 'completed'].includes(String(object(inspection.control).state))) return undefined
+      const frozen = array(inspection.endpoint_attempts ?? [])
+      if (frozen.length !== journal.attempts!.length || object(frozen.at(-1)).id !== attempt.id) return undefined
+      const dataset = datasetDestination(await this.store.readJson(request.datasetRef), join(this.options.workspace, 'datasets', request.datasetRef.digest.slice(7)))
+      const harnessRef = `${request.harnessAdapter}@git+${pathToFileURL(this.options.harnessSourceDirectory).href}#${request.harnessCommit}`
+      journal.submitted = true
+      if (attempt.repair) attempt.repair.pending = false
+      return this.collectEvidence(request, key, journal, attempt, inspection, harnessRef, dataset)
+    })
+  }
   async observeUsage(request: ModelEvaluationRequest, key: string): Promise<EvaluationUsage> {
     return withTrainingFileLock(join(this.directory(key), 'operation.lock'), async () => {
-      let journal: EvalJournal
-      try { journal = JSON.parse(await readFile(join(this.directory(key), 'state.json'), 'utf8')) as EvalJournal }
+      let journal: HitchEvalJournal
+      try { journal = JSON.parse(await readFile(join(this.directory(key), 'state.json'), 'utf8')) as HitchEvalJournal }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return unknownGpuUsage(); throw error }
-      this.assertJournal(journal, request)
-      if (journal.evidence) {
+      assertHitchAttempt(journal, request)
+      if (journal.evidence && !journal.attempts?.some(attempt => attempt.repair?.pending)) {
         const { gpuSeconds, gpuSecondsSource, usageSource, inputTokens, outputTokens, requests, elapsedSeconds } = journal.evidence
         return { gpuSeconds, gpuSecondsSource, ...(usageSource !== undefined ? { usageSource } : {}), ...(inputTokens !== undefined ? { inputTokens } : {}),
           ...(outputTokens !== undefined ? { outputTokens } : {}), ...(requests !== undefined ? { requests } : {}), ...(elapsedSeconds !== undefined ? { elapsedSeconds } : {}) }
@@ -86,22 +104,28 @@ export class HitchModelEvaluator implements ModelEvaluator {
   async cancel(request: ModelEvaluationRequest, key: string, intent: TrainingControlIntent = { schemaVersion: 2, sequence: 1, action: 'pause' }): Promise<EvaluationUsage & { tasksCompleted: boolean }> {
     requireContract(intent.action === 'pause', 'invalid-evaluation-control', 'cancel requires a pause intent')
     // Fence daemon admission before waiting for a concurrent materializer's lock.
-    await controlEvaluation(this.options.workspace, request, key, intent, args => this.call(args))
+    const before = await readHitchEvalJournal(this.directory(key))
+    if (before) assertHitchAttempt(before, request)
+    await controlEvaluation(this.options.workspace, before?.request ?? request, key, intent, args => this.call(args))
     return withTrainingFileLock(join(this.directory(key), 'operation.lock'), async () => {
-      const control = await controlEvaluation(this.options.workspace, request, key, intent, args => this.call(args))
+      const latest = await readHitchEvalJournal(this.directory(key))
+      const control = await controlEvaluation(this.options.workspace, latest?.request ?? request, key, intent, args => this.call(args))
       const path = join(this.directory(key), 'state.json')
-      let journal: EvalJournal
-      try { journal = JSON.parse(await readFile(path, 'utf8')) as EvalJournal }
+      let journal: HitchEvalJournal
+      try { journal = JSON.parse(await readFile(path, 'utf8')) as HitchEvalJournal }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
         requireContract(!control.state.submitted, 'evaluation-journal-missing', 'an admitted evaluation needs its original task journal')
         return { ...unknownGpuUsage(), tasksCompleted: !control.state.pending_reruns }
       }
-      this.assertJournal(journal, request)
+      assertHitchAttempt(journal, request)
       requireContract(!journal.evalId || journal.evalId === control.state.eval_id, 'evaluation-control-drift', 'cancellation returned another eval identity')
       requireContract(control.state.submitted || !journal.submitted, 'evaluation-control-drift', 'an admitted evaluation disappeared from the daemon index')
       journal.evalId = control.state.eval_id; journal.submitted = control.state.submitted
       if (journal.repair?.pending && !control.state.pending_reruns) { journal.repair.pending = false; delete journal.evidence }
+      for (const attempt of journal.attempts ?? []) if (attempt.repair?.pending && !control.state.pending_reruns) {
+        attempt.repair.pending = false; attempt.repair.cancelled = true; delete attempt.evidence; delete journal.evidence
+      }
       await atomicWrite(path, journal)
       if (!journal.submitted) return { ...unknownGpuUsage(), tasksCompleted: !control.state.pending_reruns }
       const inspection = object(await this.call(['eval', 'inspect', journal.evalId, '--json']))
@@ -110,52 +134,61 @@ export class HitchModelEvaluator implements ModelEvaluator {
         && !['running', 'cancelling'].includes(String(object(inspection.control).state)) }
     })
   }
-  async evaluate(request: ModelEvaluationRequest, key: string, intent: TrainingControlIntent = { schemaVersion: 2, sequence: 0, action: 'start' }): Promise<ModelEvaluationEvidence> {
+  async evaluate(request: ModelEvaluationRequest, key: string, intent: TrainingControlIntent = { schemaVersion: 2, sequence: 0, action: 'start' }, attemptContext?: { id: string; parentId?: string }): Promise<ModelEvaluationEvidence> {
     requireContract(request.schemaVersion === 2 && request.harnessAdapter === 'training-tool', 'unsupported-evaluation-harness', 'endpoint candidate evaluation currently requires training-tool')
     validateReadyEndpointBinding(request.endpointBinding, request.model, { ...request.condition, attempts: Math.max(...request.condition.slots.map(slot => slot.attempt)) }, [request.endpointBinding.deployment_receipt.source])
     requireContract(request.subject.weightsDigest === request.model.weightsDigest, 'evaluation-subject-drift', 'evaluation subject differs from its immutable model')
     requireContract(intent.action === 'start', 'invalid-evaluation-control', 'evaluate requires a start intent')
     requireContract(digestJson(this.options.budgets) === request.condition.budgetsDigest, 'evaluation-budget-drift', 'evaluation budgets differ from frozen conditions')
     return withTrainingFileLock(join(this.directory(key), 'operation.lock'), async () => {
-      const control = await controlEvaluation(this.options.workspace, request, key, intent, args => this.call(args))
-      return this.evaluatePass(request, key, control)
+      const { journal, attempt } = await freezeHitchAttempt(this.directory(key), request, attemptContext)
+      const control = await controlEvaluation(this.options.workspace, journal.request!, key, intent, args => this.call(args))
+      return this.evaluatePass(request, key, control, journal, attempt)
     })
   }
-  private async evaluatePass(request: ModelEvaluationRequest, idempotencyKey: string, control: OrderedEvaluationControl): Promise<EndpointModelEvaluationEvidence> {
+  private async evaluatePass(request: ModelEvaluationRequest, idempotencyKey: string, control: OrderedEvaluationControl, journal: HitchEvalJournal, attempt: HitchAttemptJournal): Promise<EndpointModelEvaluationEvidence> {
     const key = modelEvidenceKey({ subject: request.subject, condition: request.condition })
     const path = join(this.directory(idempotencyKey), 'state.json')
-    let journal: EvalJournal
-    try { journal = JSON.parse(await readFile(path, 'utf8')) as EvalJournal }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      journal = { key, requestDigest: digestJson(request), startedAt: Date.now() }
-    }
-    this.assertJournal(journal, request)
+    assertHitchAttempt(journal, request)
     requireContract(!journal.evalId || journal.evalId === control.state.eval_id, 'evaluation-control-drift', 'ordered start returned another eval identity')
     requireContract(control.state.submitted || !journal.submitted, 'evaluation-control-drift', 'an admitted evaluation disappeared from the daemon index')
     journal.evalId = control.state.eval_id; journal.submitted = control.state.submitted
+    if (attempt.repair?.cancelled) {
+      requireContract((attempt.repairRounds ?? 0) < this.options.budgets.maxRepairRounds, 'evaluation-recovery-exhausted', 'cancelled repair exhausted its explicit repair budget')
+      attempt.repairRounds = (attempt.repairRounds ?? 0) + 1
+      attempt.repair = { id: `rerun_${digestJson([key, attempt.id, attempt.repairRounds, 'resume']).slice(7, 39)}`, pending: true }
+    }
     await atomicWrite(path, journal)
-    if (journal.evidence) {
-      if (journal.evidence.complete || ((journal.repairRounds ?? 0) >= this.options.budgets.maxRepairRounds && !journal.repair?.pending)) return validateModelEvidence(journal.evidence, request) as EndpointModelEvaluationEvidence
-      if (!journal.repair?.pending) {
-        journal.repairRounds = (journal.repairRounds ?? 0) + 1
-        journal.repair = { id: `rerun_${digestJson([key, journal.repairRounds]).slice(7, 39)}`, pending: true }
-        journal.retainedTrials = journal.evidence.trials.filter(trial => trial.valid)
+    if (attempt.evidence) {
+      if (attempt.evidence.complete || ((attempt.repairRounds ?? 0) >= this.options.budgets.maxRepairRounds && !attempt.repair?.pending)) return validateModelEvidence(attempt.evidence, request) as EndpointModelEvaluationEvidence
+      if (!attempt.repair?.pending) {
+        attempt.repairRounds = (attempt.repairRounds ?? 0) + 1
+        attempt.repair = { id: `rerun_${digestJson([key, attempt.id, attempt.repairRounds]).slice(7, 39)}`, pending: true }
+        attempt.retainedTrials = attempt.evidence.trials.filter(trial => trial.valid)
         await atomicWrite(path, journal)
       }
-      try { await this.call(['eval', 'rerun', journal.evalId, '--invalid', '--daemon', '--rerun-id', journal.repair.id, '--control-file', control.file], 5_000) }
+    }
+    if (attempt.repair?.pending) {
+      const attemptFile = join(this.directory(idempotencyKey), 'attempts', attempt.id, 'endpoint-attempt.json')
+      if (attempt.parentId) {
+        const capabilities = object(await this.call(['capabilities', '--json']))
+        requireContract(capabilities.endpoint_evaluation_attempts === '1', 'evaluation-recovery-unavailable', 'Hitch must support explicit endpoint evaluation attempts')
+        await atomicWrite(attemptFile, hitchEndpointAttempt(attempt))
+      }
+      try { await this.call(['eval', 'rerun', journal.evalId!, '--invalid', '--daemon', '--rerun-id', attempt.repair.id, '--control-file', control.file,
+        ...(attempt.parentId ? ['--endpoint-attempt-file', attemptFile] : [])], 5_000) }
       catch (error) {
         if (error instanceof TrainingContractError && error.code === 'process-timeout') throw new TrainingContractError('evaluation-pending', 'Hitch repair is still running')
         throw error
       }
-      journal.repair.pending = false; delete journal.evidence
+      attempt.repair.pending = false; delete attempt.evidence; delete journal.evidence
       await atomicWrite(path, journal)
     }
     const harnessRef = `${request.harnessAdapter}@git+${pathToFileURL(this.options.harnessSourceDirectory).href}#${request.harnessCommit}`
     const dataset = await this.materialize(request.datasetRef)
-    const binding = publicEndpointBinding(request.endpointBinding)
-    const bindingFile = join(this.directory(idempotencyKey), 'endpoint-binding.json')
-    await atomicWrite(bindingFile, request.endpointBinding)
+    const binding = publicEndpointBinding(journal.request!.endpointBinding)
+    const bindingFile = join(this.directory(idempotencyKey), 'attempts', attempt.id, 'endpoint-binding.json')
+    await atomicWrite(bindingFile, attempt.request.endpointBinding)
     if (!journal.submitted) {
       const accepted = object(await this.call(['eval', 'submit', '--dataset', dataset, '--harness', harnessRef,
         '--model', binding.endpoint_ref, '--model-binding-file', bindingFile,
@@ -167,6 +200,12 @@ export class HitchModelEvaluator implements ModelEvaluator {
       await atomicWrite(path, journal)
     }
     const inspection = object(await this.call(['eval', 'inspect', journal.evalId, '--json']))
+    return this.collectEvidence(request, idempotencyKey, journal, attempt, inspection, harnessRef, dataset)
+  }
+  private async collectEvidence(request: ModelEvaluationRequest, idempotencyKey: string, journal: HitchEvalJournal, attempt: HitchAttemptJournal,
+    inspection: Json, harnessRef: string, dataset: string): Promise<EndpointModelEvaluationEvidence> {
+    const key = modelEvidenceKey({ subject: request.subject, condition: request.condition })
+    const path = join(this.directory(idempotencyKey), 'state.json'), binding = publicEndpointBinding(journal.request!.endpointBinding)
     if (!inspection.result) throw new TrainingContractError('evaluation-pending', `Hitch evaluation ${journal.evalId} is still running`)
     const actualRequest = object(inspection.request), result = object(inspection.result)
     requireContract(actualRequest.model === binding.endpoint_ref && actualRequest.harness_ref === harnessRef && actualRequest.dataset === dataset
@@ -183,7 +222,11 @@ export class HitchModelEvaluator implements ModelEvaluator {
       && digestJson(result.endpoint_binding) === digestJson(binding), 'hitch-endpoint-drift', 'canonical evaluation changed its frozen endpoint')
     const frozenHarness = object(object(await this.store.readJson(request.subject.harnessRef)).hitch)
     await this.store.readBytes(request.verifierRef)
-    const trials: EndpointModelEvaluationEvidence['trials'] = []
+    const frozenAttempts = array(inspection.endpoint_attempts ?? [{ id: journal.attempts![0]!.id, endpoint_binding: binding }]).map(object)
+    requireContract(frozenAttempts.length === journal.attempts!.length && frozenAttempts.every((value, index) => value.id === journal.attempts![index]!.id
+      && value.parent_id === journal.attempts![index]!.parentId && digestJson(value.endpoint_binding) === digestJson(publicEndpointBinding(journal.attempts![index]!.request.endpointBinding))),
+    'hitch-endpoint-attempt-drift', 'Hitch changed the frozen endpoint attempt lineage')
+    const trials: EndpointModelEvaluationEvidence['trials'] = [], bindings = new Map<string, string>()
     for (const item of array(result.trials)) {
       const trial = object(item)
       if (typeof trial.run_id !== 'string') continue
@@ -194,14 +237,21 @@ export class HitchModelEvaluator implements ModelEvaluator {
       requireContract(loaded.record_status === 'valid' && loaded.trajectory_status !== 'corrupt', 'corrupt-evaluation-run', 'canonical run integrity failed')
       const record = object(loaded.record), context = object(record.context), parent = object(record.parent), model = object(record.model)
       const harness = object(record.harness), protocol = object(record.protocol)
+      const origin = journal.attempts!.find(value => digestJson(publicEndpointBinding(value.request.endpointBinding)) === digestJson(model.endpoint_binding))
+      requireContract(origin, 'hitch-endpoint-drift', 'canonical run used an unadmitted endpoint attempt')
+      const trialBinding = publicEndpointBinding(origin.request.endpointBinding)
+      if (origin.parentId) requireContract(array(frozenAttempts.find(value => value.id === origin.id)!.selected_trials).some(value => {
+        const slot = object(value); return slot.task_id === taskId && slot.attempt === attempt
+      }), 'unexpected-evaluation-slot', 'repair executed a slot outside its frozen invalid selection')
+      bindings.set(runId, origin.id)
       const task = request.datasetTasks.find(value => value.id === taskId)
       requireContract(task && task.environmentRef.digest === slot.environmentDigest, 'environment-descriptor-drift', 'slot environment identity differs')
       const environment = object(await this.store.readJson(task.environmentRef))
       requireContract(record.run_id === runId && parent.eval_id === journal.evalId && parent.attempt === attempt
         && context.kind === 'benchmark_task' && context.task_id === taskId && context.task_digest === environment.taskDigest
         && context.verifier_identity === environment.verifierIdentity && protocol.environment_identity === environment.hitchEnvironmentIdentity
-        && model.provider === 'external-endpoint' && model.effective_id === binding.wire_model && model.requested_id === binding.endpoint_ref
-        && digestJson(model.endpoint_binding) === digestJson(binding)
+        && model.provider === 'external-endpoint' && model.effective_id === trialBinding.wire_model && model.requested_id === trialBinding.endpoint_ref
+        && digestJson(model.endpoint_binding) === digestJson(trialBinding)
         && harness.harness_id === frozenHarness.harnessId && harness.revision_identity === frozenHarness.revisionIdentity
         && harness.artifact_id === frozenHarness.artifactId && matchesHarnessRef(harness.requested_ref, harnessRef, request.harnessAdapter, request.harnessCommit),
       'canonical-evaluation-identity-drift', 'canonical run differs from the sealed task, verifier, environment, harness or endpoint')
@@ -210,11 +260,12 @@ export class HitchModelEvaluator implements ModelEvaluator {
         && object(evidence.verifier).status === 'complete' && observation.reward === trial.reward
       trials.push({ taskId, attempt, runId, valid, ...(valid ? { reward: Number(trial.reward) } : {}), inferenceError: !valid })
     }
-    const evidence: EndpointModelEvaluationEvidence = { schemaVersion: 2, evalId: journal.evalId, subject: request.subject, condition: request.condition,
-      evidenceKey: key, endpointBinding: binding, trials, complete: trials.length === request.condition.slots.length && trials.every(trial => trial.valid),
+    const evidence: EndpointModelEvaluationEvidence = { schemaVersion: 2, evalId: journal.evalId!, subject: request.subject, condition: request.condition,
+      evidenceKey: key, endpointBinding: binding, endpointAttempts: publicHitchAttempts(journal, trials, bindings), trials, complete: trials.length === request.condition.slots.length && trials.every(trial => trial.valid),
       ...this.usage(result, journal.startedAt) }
-    for (const retained of journal.retainedTrials ?? []) requireContract(trials.some(trial => digestJson(trial) === digestJson(retained)), 'valid-slot-rerun', 'repair changed a valid observation')
+    for (const retained of attempt.retainedTrials ?? []) requireContract(trials.some(trial => digestJson(trial) === digestJson(retained)), 'valid-slot-rerun', 'repair changed a valid observation')
     journal.evidence = validateModelEvidence(evidence, request) as EndpointModelEvaluationEvidence
+    attempt.evidence = journal.evidence
     await atomicWrite(path, journal)
     return journal.evidence
   }

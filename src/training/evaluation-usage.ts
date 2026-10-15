@@ -3,7 +3,10 @@ import { parseModelVersion, requireContract } from './schema.js'
 import type { ModelTrainingStore } from './store.js'
 import type { EvaluationUsage, ModelEvaluator, ModelExperimentState, ModelTrainingRun, ModelVersion, ReadyEvaluationEndpointBinding } from './types.js'
 
-export async function savedEvaluationBinding(store: ModelTrainingStore, state: ModelExperimentState, model: ModelVersion): Promise<ReadyEvaluationEndpointBinding> {
+export async function savedEvaluationBinding(store: ModelTrainingStore, state: ModelExperimentState, model: ModelVersion,
+  intentId?: string, runId?: string): Promise<ReadyEvaluationEndpointBinding> {
+  const attempt = runId && intentId ? state.runs[runId]?.evaluationIntents[intentId]?.attempts?.at(-1) : undefined
+  if (attempt) return store.readJson<ReadyEvaluationEndpointBinding>(attempt.bindingRef)
   const preparation = state.endpointPreparations?.[model.id]
   requireContract(preparation?.status === 'ready' && preparation.bindingRef, 'endpoint-preparation-missing', 'pending evaluation must retain its original ready model binding')
   return store.readJson<ReadyEvaluationEndpointBinding>(preparation.bindingRef)
@@ -83,7 +86,7 @@ export async function refreshEvaluationUsage(store: ModelTrainingStore, evaluato
     const [role, partition] = intentId.split(':') as [string, 'dev' | 'held-out']
     const modelRef = role === 'baseline' ? run.parent.modelRef : run.candidateRef!
     const model = parseModelVersion(await store.readJson(modelRef))
-    const binding = await savedEvaluationBinding(store, state, model)
+    const binding = await savedEvaluationBinding(store, state, model, intentId, run.id)
     const observed = await evaluator.observeUsage(modelEvaluationRequest(state.spec, model, modelRef, partition, binding), `${state.id}/${intent.key}`)
     await store.transaction(state.id, s => chargeEvaluationUsage(store, s, run.id, intentId, observed))
   }
