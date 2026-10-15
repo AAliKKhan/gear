@@ -1,6 +1,6 @@
 # 模型端点接入与普通推理运行时简化规范
 
-- 状态：软件实现与软件检查已完成；目标 GPU 验收待完成。作为 Hitch PR 51 与 Gear PR 64 的调整依据。
+- 状态：软件检查、Vast 双卡短验收已完成；静态训练/推理分卡及完整 Harbor 验收待完成。作为 Hitch PR 51 与 Gear PR 64 的调整依据。
 - 日期：2026-10-15。
 - 适用范围：Hitch 普通模型调用、独立评测，以及 Gear 的模型候选评测。
 - 代码基线：[Hitch PR 51](https://github.com/rsi-gear/agent-hitch/pull/51) 的 `2a0b729c5d984955cc3365fb7094f540e1368b66`；[Gear PR 64](https://github.com/rsi-gear/gear/pull/64) 的 `db4582b189c991ac63ca51efae18389ab121fe44`。
@@ -11,7 +11,7 @@
 ## 1 核心决定
 
 1. 多个独立 run、eval 和 daemon 可以使用同一模型端点。任务不选推理 GPU，不创建模型副本，不拥有模型服务的生命周期。
-2. 默认部署方案为 SGLang；多副本时优先使用官方 SGLang Model Gateway。单副本可直接连接 SGLang。Hitch 的端点契约不绑定具体引擎品牌。
+2. 默认部署方案为 SGLang；多副本时优先使用 SGLang Model Gateway 的独立后继发布 SMG（本轮验证 1.12.0）。单副本可直接连接 SGLang。Hitch 的端点契约不绑定具体引擎品牌。
 3. 首版使用独立推理 GPU，与训练 GPU 静态分开。动态共卡不属于首版交付要求。
 4. Hitch 不再维护普通推理的 Python 运行时、部署 API、GPU 账本、进程监督或副本调度器，也不将这些实现改写为 TypeScript。
 5. `packages/inference/python/hitch_inference/` 全部退出。被替代的代码、包配置、启动器、fixture 和内部测试可以直接删除，无需为了未发布接口维护长期兼容层。
@@ -328,7 +328,7 @@ CPU 测试可证明任务和端点契约；实机记录证明引擎、拓扑和�
 
 ### 10.3 当前实现与验收状态
 
-本轮两仓库的软件实现、软件回归与包检查已通过。GPU 实机及完整真实 Harbor benchmark 尚未运行，当前状态不代表第 10.2 节验收完成。
+本轮两仓库的软件实现、软件回归与包检查已通过。2026-10-15 已在 Vast 单机 2×RTX 3090 上完成限定范围的真实引擎、双卡和双副本验证，并运行两个实际 Codex 工具任务。使用官方镜像内原生进程启动；Compose 容器未实跑。静态训练/推理分卡与完整 Harbor 尚未运行，第 10.2 节完整验收仍未完成。见[实机短验收报告](validation/external-inference-gpu-2026-10-15.md)。
 
 | 范围 | 当前状态与证据边界 |
 | --- | --- |
@@ -337,13 +337,13 @@ CPU 测试可证明任务和端点契约；实机记录证明引擎、拓扑和�
 | 构建、打包与干净安装 | 构建、类型/静态、架构/合同/文档与运行依赖闭合检查通过；npm/wheel 干净安装流程及无需 Python/CUDA 的已安装 Hitch 端点 canary 通过，安装通过不证明 GPU 部署可用 |
 | 上游示例与 HTTP 工具 | 固定版本 SGLang/官方 Gateway 配置、TP=2 变体及正常预算验收工具的软件检查通过；配置解析、上游参数和受控协议检查不等于容器/GPU 验收 |
 | 自动候选部署 | 未实现；已交付外部 ready binding 文件映射，缺失时持久化等待，部署由所有者或外部流水线完成 |
-| SGLang TP=1 + 实际 Harness 工具任务 | **NOT RUN：尚未提供 GPU 主机** |
-| SGLang TP=2 实际双卡执行 | **NOT RUN：尚未提供 GPU 主机** |
-| 官方 Gateway 两个 TP=1 副本的分布与取消隔离 | **NOT RUN：尚未提供 GPU 主机** |
-| 静态分卡下训练 rollout、独立评测与 HF 导出 | **NOT RUN：尚未提供 GPU 主机** |
+| SGLang TP=1 + 实际 Harness 工具任务 | 两个 TP=1 副本经 SMG 1.12.0 完成 Codex 0.145.0 求和工具任务；单个 TP=1 直连未单独测试 |
+| SGLang TP=2 实际双卡执行 | PASS：真实 TP0/TP1、双卡负载、Responses/Chat 各 9 项 HTTP 检查及 Codex SHA-256 工具任务 |
+| 官方 Gateway 两个 TP=1 副本的分布与取消隔离 | SMG 1.12.0 PASS：Responses/Chat 各 9 项，两 worker 请求正增量、取消隔离与实际 Codex 工具任务。旧 bundled sglang-router 0.3.2 的 Chat 通过，但 Responses named tool_choice 返回 400，不适用于该 Responses 配置 |
+| 静态分卡下训练 rollout、独立评测与 HF 导出 | **NOT RUN：本次两张卡用于推理拓扑短验证，没有同时运行训练** |
 | 完整真实 Harbor benchmark | **NOT RUN：本轮仅完成软件合同与 canary，未取得整套真实任务/verifier 执行记录** |
 
-具体绑定文件和检查入口见[独立评测端点说明](training/standalone-inference.zh-CN.md)与[ready binding schema](schemas/ready-evaluation-endpoint-binding-v1.schema.json)。后续只按实际取得的记录更新对应状态；历史自研池证据不填补上述未运行项。
+具体绑定文件和检查入口见[独立评测端点说明](training/standalone-inference.zh-CN.md)与[ready binding schema](schemas/ready-evaluation-endpoint-binding-v1.schema.json)。后续只按实际取得的记录更新对应状态；历史自研池证据不填补上述未运行项。实机发现 bundled Gateway 0.3.2 的协议类型拒绝标准 Responses 指定函数名请求；改用官方已发布 SMG 1.12.0 wheel 后同一严格探针及真实 Codex 任务通过。复用发布物，不增加自研协议转换层；示例独立固定 Gateway 版本，不能把 SGLang 引擎版本视为 Gateway 兼容性保证。
 
 ## 11 交付顺序与完成条件
 
