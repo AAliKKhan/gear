@@ -593,4 +593,4 @@ M0 是进入训练的前置门槛；M2 完成不等于模型质量提升。每�
 - [Slime 固定源码](https://github.com/THUDM/slime/tree/41014d1f29e201137fdffce737bb8bac65bc5219)：训练 hook、样本语义、权重同步；最终采用的版本由 M0 compatibility lock 决定。
 - [Hitch dev 推理源码](https://github.com/rsi-gear/agent-hitch/tree/9788b85199f3f087fa59fff85dd7ddfba8831ed4/src/inference)：模型导入、推理锁、进程与设备生命周期。
 
-本稿经过源码核查，尚未执行 GPU 训练、HF 数值对齐或 Harbor 端到端测试；这些是 M0–M4 的验收项。
+本稿保留初版设计与历史源码依据；当前运行契约以[模型端点规范](model-api-inference-service-spec.zh-CN.md)及[v2 controller](training/controller-v2.zh-CN.md)为准。已有[有界 GPU 训练/Harbor 端点评测诊断](validation/training-gpu-loop-2026-10-15.md)，但其 `validated:false` / `pending-gpu`、零 reward/loss/梯度不能声明 M0–M4 认证、完整 HF 数值对齐或质量验收完成。

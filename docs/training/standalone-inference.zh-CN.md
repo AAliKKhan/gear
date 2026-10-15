@@ -63,7 +63,7 @@ v1/v2 controller 均配置私有 `evaluationBindings`：
 
 ## 验收与历史证据
 
-本次上游 GPU 路径均为 **未运行：尚未提供 GPU 主机**。必需实机项为真实 SGLang TP=1 与所选 Harness 的完整工具任务、TP=2 实际双卡执行、官方 Gateway 两个 TP=1 副本的分布指标与取消隔离，以及静态分卡下保留的训练 rollout/HF 导出。上游示例工具保存正常预算的文本、多轮、SSE、普通/流式工具往返、并发、usage 与取消记录。CPU/受控 HTTP 检查只证明软件合同。
+2026-10-15 的有界 GPU 验证已覆盖真实 SGLang TP=2、官方 SMG 的两个 TP=1 worker、两种 API、分布/取消隔离和实际 Codex 工具任务，见[推理拓扑记录](../validation/external-inference-gpu-2026-10-15.md)。另一次[训练与端点评测诊断](../validation/training-gpu-loop-2026-10-15.md)在 GPU 0 执行真实 Slime rollout、一次更新及 native/HF 导出，GPU 1 运行普通 SGLang TP=1 服务；实际本机 Harbor/Docker 的 baseline 和 candidate 通过严格端点验证及证据配对，均为有效 reward=0、meanDelta=0。该轮明确 `validated:false`、runtime lock 为 `pending-gpu`；零 loss/梯度不证明学习提升或正式认证。完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认；Compose 容器、完整 Harbor benchmark、远程 Harbor worker 与 held-out 质量尚未验收。CPU/受控 HTTP 检查只证明软件合同。
 
 两仓库构建后，在 Gear 根目录运行实际 CLI/daemon 软件合同检查：
 

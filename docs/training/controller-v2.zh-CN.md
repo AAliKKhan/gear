@@ -2,7 +2,7 @@
 
 v2 的配方与离线 SFT 使用方法见 [版本化配方指南](recipes.zh-CN.md)。SFT 训练采用 actor-only GPU 分配，独立评估仍沿用本文部署。
 
-v2 将任务执行留在控制端，把训练交给固定身份的模型节点；独立评估连接部署所有者准备的外部模型端点。本文说明配置与恢复合同；实机通过范围见 [单卡认证记录](https://github.com/rsi-gear/gear/tree/b1baa88799771cafde5ec9704291e5dc2f25a601/docs/training/certifications/2026-09-10-rtx5090-single-gpu)。当前验收覆盖本地 Harbor / Docker 加远程单卡模型节点，远程 Harbor 和双卡尚未验收。
+v2 将任务执行留在控制端，把训练交给固定身份的模型节点；独立评估连接部署所有者准备的外部模型端点。本文说明配置与恢复合同；正式实机认证范围见 [单卡认证记录](https://github.com/rsi-gear/gear/tree/b1baa88799771cafde5ec9704291e5dc2f25a601/docs/training/certifications/2026-09-10-rtx5090-single-gpu)。另有 [2026-10-15 双卡推理记录](../validation/external-inference-gpu-2026-10-15.md)及[静态分卡训练/端点评测诊断](../validation/training-gpu-loop-2026-10-15.md)，覆盖本机 Harbor / Docker、远程训练节点的一次真实更新与 native/HF 导出、普通端点基线/candidate 配对；后者仍为 `validated:false` / `pending-gpu`，reward/loss/grad norm 为 0，不构成学习提升或正式认证。完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认，远程 Harbor worker 与完整 benchmark 未验收。
 
 ## 控制端
 
@@ -144,13 +144,13 @@ v2 训练使用独立于 request/job/checkpoint 摘要的 `trainingControl={sche
 
 每次 advance 继续收集训练后端累计 GPU 用量及 evaluator 的实际任务 usage。新预算显式选择 gpuSecondsScope=training，totalGpuSeconds 只覆盖训练；缺少可靠推理计量时 total 覆盖范围在配置阶段被拒绝。共享推理 gpuSeconds/gpuSecondsSource 保持 null，不能补 0。达到训练预算时有序暂停并继续收尾，训练资源释放与评估任务结束后进入 paused；预算耗尽不能再次 resume。首次 intent 尚无 evaluator journal 时保持用量未知，只协调同一身份，不当作零成本或物理释放证据。
 
-已有累计计量继续按原身份去重并保持单调，迟到结果不能降低较新的已知费用，未知计量不会覆盖已有观察。控制端观察依赖 advance；训练节点账本在控制端离线时继续累计。历史 evidence 保留原成本和摘要，不扩写为新共享推理的硬件证明。新的官方 SGLang 单副本、TP=2、Gateway 两副本与静态分卡验收均待提供实际 GPU 主机。
+已有累计计量继续按原身份去重并保持单调，迟到结果不能降低较新的已知费用，未知计量不会覆盖已有观察。控制端观察依赖 advance；训练节点账本在控制端离线时继续累计。历史 evidence 保留原成本和摘要，不扩写为新共享推理的硬件证明。新的官方 SGLang / SMG 拓扑及静态分卡已有独立有界实机记录，见本文开头链接；诊断结果不自动将 runtime lock 变为 validated。
 
 `freeze-deployment` 要求 Hitch 的 `controller_runtime_observation="2"` 与 `local_execution_observation="2"`。先调用 `hitch training runtime --json` 观察 CLI 包，再通过 `hitch worker observe local-docker --nonce HEX --json` 请求 daemon 的新观察。daemon 在启动、开放 HTTP 前保留 runtime 摘要，观察时再次读取磁盘；启动摘要、当前摘要和 CLI 摘要必须一致。daemon 启动后重新构建或切换 checkout，需要重启 daemon。该机制检查启动后是否漂移，并非对 Node 已缓存模块的逐字节证明；不要在 daemon 启动过程中替换运行包。
 
 上述 runtime 摘要覆盖编译代码、training-tool 和 Harbor bridge，并包含 Node 版本、包自身的 Git commit 与代码修改状态；部署中不记录本机绝对路径。训练 preflight 另核对 `trainer.runtimeLock.hitchCommit`，不同 commit 会在 episode 提交前拒绝。无自身 checkout 的安装包不能借用父目录仓库的 commit；当前 v2 训练要求使用可观察的 Hitch 源码 checkout。
 
-现场环境观察只运行固定的只读命令：Harbor `--version`、Docker `info` 与 `buildx version`。Hitch 使用 daemon 的实际环境和 Harbor/Docker 选择规则，记录可执行文件摘要、Harbor 版本、Docker engine ID/版本/系统/架构与 buildx 插件版本。Harbor 或 Linux Docker engine 不可用时，冻结拒绝；buildx 可用与否独立记录，不等于 BuildKit builder 已通过验收。Harbor 可执行文件摘要也不代表完整 Python 依赖环境摘要。响应不包含 executable 路径、环境变量或原始错误输出，sandbox 明确为 `unverified`。此观察不会拉取镜像、安装工具或执行任务；真实容器、Harbor→模型代理链路和 GPU 验收仍需后续执行。
+现场环境观察只运行固定的只读命令：Harbor `--version`、Docker `info` 与 `buildx version`。Hitch 使用 daemon 的实际环境和 Harbor/Docker 选择规则，记录可执行文件摘要、Harbor 版本、Docker engine ID/版本/系统/架构与 buildx 插件版本。Harbor 或 Linux Docker engine 不可用时，冻结拒绝；buildx 可用与否独立记录，不等于 BuildKit builder 已通过验收。Harbor 可执行文件摘要也不代表完整 Python 依赖环境摘要。响应不包含 executable 路径、环境变量或原始错误输出，sandbox 明确为 `unverified`。此观察本身不会拉取镜像、安装工具或执行任务；实际容器、Harbor→模型代理与 GPU 的有界诊断见本文开头记录，不由环境观察自动证明。
 
 远程 provider 可单独通过 `hitch worker observe PROVIDER --json` 观察。worker 注册文件的 `features` 需要增加 `"execution_observation": "2"`，并运行支持它的 `hitch worker run`；这只是协议声明，不能代替实际回复。新字段省略时，旧 v1 worker 注册与任务执行行为保持原样。若调整已有注册，仍使用原注册命令取得新的 generation 和凭据，不能继续使用旧凭据。
 
@@ -179,4 +179,4 @@ gear training rollback EXP_ID RELEASE_ID --config /srv/gear-controller/controlle
 
 训练节点重启后，旧作业释放仍须结合归档启动身份和训练设备账本核验；不能用旧 PID 终止新启动周期的进程，也不能把旧 checkpoint/job 静默改绑。新的训练部署需要重新冻结和验证。普通评估只收敛自身任务和请求，训练资源是否释放由训练后端报告，推理服务资源由部署所有者报告。
 
-远程 worker 再注册或撤销后，旧 generation 的在途状态提交和制品发布仍须按原 execution/资源身份核对；新 worker 的空闲报告不能替代旧任务的清理证明。任务执行环境的进程、主机启动和 Docker engine 归属由 Hitch 原有任务资源协议处理。这些 CPU/HTTP 合同检查不代表真实跨主机 Harbor/GPU 验收，新的上游端点拓扑仍需独立实机记录。
+远程 worker 再注册或撤销后，旧 generation 的在途状态提交和制品发布仍须按原 execution/资源身份核对；新 worker 的空闲报告不能替代旧任务的清理证明。任务执行环境的进程、主机启动和 Docker engine 归属由 Hitch 原有任务资源协议处理。这些 CPU/HTTP 合同检查本身不代表跨主机 Harbor/GPU 验收；新的上游拓扑与本机 Harbor 加远程 GPU 诊断已有本文开头的独立实机记录，仍不覆盖远程 Harbor worker。

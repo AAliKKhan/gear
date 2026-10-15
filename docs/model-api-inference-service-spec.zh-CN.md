@@ -1,6 +1,6 @@
 # 模型端点接入与普通推理运行时简化规范
 
-- 状态：软件检查、Vast 双卡短验收已完成；静态训练/推理分卡及完整 Harbor 验收待完成。作为 Hitch PR 51 与 Gear PR 64 的调整依据。
+- 状态：软件检查、Vast 推理拓扑短验收及静态分卡下真实训练/HF 导出/单任务 Harbor 端点评测诊断已完成；完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认。诊断不构成正式 runtime 认证或完整 benchmark。作为 Hitch PR 51 与 Gear PR 64 的调整依据。
 - 日期：2026-10-15。
 - 适用范围：Hitch 普通模型调用、独立评测，以及 Gear 的模型候选评测。
 - 代码基线：[Hitch PR 51](https://github.com/rsi-gear/agent-hitch/pull/51) 的 `2a0b729c5d984955cc3365fb7094f540e1368b66`；[Gear PR 64](https://github.com/rsi-gear/gear/pull/64) 的 `db4582b189c991ac63ca51efae18389ab121fe44`。
@@ -328,7 +328,7 @@ CPU 测试可证明任务和端点契约；实机记录证明引擎、拓扑和�
 
 ### 10.3 当前实现与验收状态
 
-本轮两仓库的软件实现、软件回归与包检查已通过。2026-10-15 已在 Vast 单机 2×RTX 3090 上完成限定范围的真实引擎、双卡和双副本验证，并运行两个实际 Codex 工具任务。使用官方镜像内原生进程启动；Compose 容器未实跑。静态训练/推理分卡与完整 Harbor 尚未运行，第 10.2 节完整验收仍未完成。见[实机短验收报告](validation/external-inference-gpu-2026-10-15.md)。
+本轮两仓库的软件实现、软件回归与包检查已通过。2026-10-15 在 Vast 单机 2×RTX 3090 上完成限定范围的真实引擎、双卡和双副本验证，并运行两个实际 Codex 工具任务，见[推理拓扑短验收报告](validation/external-inference-gpu-2026-10-15.md)。另一次固定 Slime 环境的实测将训练与普通推理静态分卡，完成一个任务、group=2、一次更新、原生 checkpoint/HF 导出及真实 Harbor 基线/candidate 端点评测配对，见[训练与端点评测诊断报告](validation/training-gpu-loop-2026-10-15.md)。后者明确 `validated:false`、runtime lock 为 `pending-gpu`，reward=0/0、loss=0、grad norm=0，不能声明学习提升或正式认证。完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认；费用为创建至 absent 时长的 Vast 范围估算（Vast 计算与磁盘估算 $2.282704，含 $1 传输预留的保守 Vast 估算 $3.300331（< $5），不含既有跳板网络），非最终账单；Compose 容器、完整 Harbor benchmark 及第 10.2 节全部验收尚未完成。
 
 | 范围 | 当前状态与证据边界 |
 | --- | --- |
@@ -337,11 +337,12 @@ CPU 测试可证明任务和端点契约；实机记录证明引擎、拓扑和�
 | 构建、打包与干净安装 | 构建、类型/静态、架构/合同/文档与运行依赖闭合检查通过；npm/wheel 干净安装流程及无需 Python/CUDA 的已安装 Hitch 端点 canary 通过，安装通过不证明 GPU 部署可用 |
 | 上游示例与 HTTP 工具 | 固定版本 SGLang/官方 Gateway 配置、TP=2 变体及正常预算验收工具的软件检查通过；配置解析、上游参数和受控协议检查不等于容器/GPU 验收 |
 | 自动候选部署 | 未实现；已交付外部 ready binding 文件映射，缺失时持久化等待，部署由所有者或外部流水线完成 |
-| SGLang TP=1 + 实际 Harness 工具任务 | 两个 TP=1 副本经 SMG 1.12.0 完成 Codex 0.145.0 求和工具任务；单个 TP=1 直连未单独测试 |
+| SGLang TP=1 + 实际 Harness 工具任务 | 两个 TP=1 副本经 SMG 1.12.0 完成 Codex 0.145.0 求和工具任务；另以 SGLang 0.5.15.post1 / Qwen3.5-2B 单 TP=1 直连，通过严格 Hitch 就绪验证及真实 Harbor 基线/candidate canary，均 valid / reward=0 |
 | SGLang TP=2 实际双卡执行 | PASS：真实 TP0/TP1、双卡负载、Responses/Chat 各 9 项 HTTP 检查及 Codex SHA-256 工具任务 |
 | 官方 Gateway 两个 TP=1 副本的分布与取消隔离 | SMG 1.12.0 PASS：Responses/Chat 各 9 项，两 worker 请求正增量、取消隔离与实际 Codex 工具任务。旧 bundled sglang-router 0.3.2 的 Chat 通过，但 Responses named tool_choice 返回 400，不适用于该 Responses 配置 |
-| 静态分卡下训练 rollout、独立评测与 HF 导出 | **NOT RUN：本次两张卡用于推理拓扑短验证，没有同时运行训练** |
-| 完整真实 Harbor benchmark | **NOT RUN：本轮仅完成软件合同与 canary，未取得整套真实任务/verifier 执行记录** |
+| 静态分卡下训练 rollout、独立评测与 HF 导出 | 有界诊断已完成：GPU 0 真实 rollout、一次更新及 native/HF 导出；GPU 1 普通服务在训练清理后保持原 PID 并成功响应。baseline/candidate 严格评测及配对通过，meanDelta=0。`validated:false` / `pending-gpu`；完整本机制品全闭包与离线 finite 复核已通过（108 个对象、35,467,670,234 字节），精确租机销毁已确认 |
+| 真实 Harbor canary | 一个冻结任务的真实工具/任务/verifier 链路已执行；基线和 candidate 评测均 valid、reward=0，配对 inferenceErrorRate=0。任务执行为本机 Harbor / Docker，模型节点在远端 |
+| 完整真实 Harbor benchmark | **NOT RUN：单任务流程诊断不代表整套 benchmark、held-out 质量或正式运行时认证；远程 Harbor worker 未验收** |
 
 具体绑定文件和检查入口见[独立评测端点说明](training/standalone-inference.zh-CN.md)与[ready binding schema](schemas/ready-evaluation-endpoint-binding-v1.schema.json)。后续只按实际取得的记录更新对应状态；历史自研池证据不填补上述未运行项。实机发现 bundled Gateway 0.3.2 的协议类型拒绝标准 Responses 指定函数名请求；改用官方已发布 SMG 1.12.0 wheel 后同一严格探针及真实 Codex 任务通过。复用发布物，不增加自研协议转换层；示例独立固定 Gateway 版本，不能把 SGLang 引擎版本视为 Gateway 兼容性保证。
 
