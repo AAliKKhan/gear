@@ -25,4 +25,6 @@ class RandomSearch(StagedSearch):
         ranker: CandidateRanker = rank_candidates,
         stop_rule: StopRule = stop_reason,
     ) -> None:
-        super().__init__(parent_policy, sampler, proposal_planner, ranker, stop_rule, ("global",))
+        super().__init__(
+            parent_policy, sampler, proposal_planner, ranker, stop_rule, ("global",), ()
+        )

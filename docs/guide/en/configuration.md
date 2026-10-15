@@ -23,13 +23,19 @@ editing a file cannot silently change a running experiment.
 | Field | Current meaning |
 | --- | --- |
 | `target.adapter` | `dsh` or `pi` |
-| `algorithm` | `gepa`, `random-search` or a Python entrypoint; the SDK also accepts configured policy instances |
+| `algorithm` | `gepa`, `random-search`, a Python entrypoint, or `{name: gepa, options: {promotion_widths: [2, 1]}}`; the SDK also accepts configured policy instances |
 | `objective.metric` | `{metric: pass_rate}` is the default shorthand; advanced objectives use `objective.terms` and `objective.constraints` |
 | `validation.mode` | `holdout` requires independent tasks; explicit `research` labels shared-set research |
 | `budget.rounds` | Defaults to 1 |
 | `budget.max_candidates` | Candidate limit for the entire run, default 2 |
 | `budget.repetitions` | Repetitions per task, default 1 |
 | `budget.max_evaluations` | Physical attempt limit for the entire run, default 40, including baseline, candidates, final validation and failure repair |
+
+GEPA's default `promotion_widths: [2, 1]` limits bridge and global candidates
+within each parent batch. It does not set the generation budget or the number
+of parent batches. The [4 → 2 → 1 example](example-algorithm.md)
+sets `max_candidates: 4` explicitly; the project default remains 2. Algorithm
+options are frozen at admission and preserved on resume.
 
 Submissions with unknown outcomes keep their reservations. Resume keeps the
 same ledger. The project API currently has no hard dollar limit; missing
@@ -164,7 +170,9 @@ and durably implement submit/inspect/cancel. Naming an executable alone is not
 a working provider. `passEnv` lists variable names; values do not enter project locks.
 
 A Target may instead use a `kind: "hitch"` profile with `executable`, `root`,
-`harnessRef`, `model`, `baseImage`, `passEnv` and `timeoutMs`. New Target profiles default to DSH `0.1.5-rc.3` or Pi `0.84.1`; existing profiles retain their exact revision. The current DSH release pins its HMR dependency upstream, without a Gear-only override. DSH requires an
+`harnessRef`, `model`, `baseImage`, `passEnv`, `timeoutMs` and optional `maxConcurrent`.
+`maxConcurrent` is a positive integer and defaults to `1`; set it to `4` (or use `gear profile create … --max-concurrent 4`) to request up to four concurrent trials per evaluation. Hitch may admit fewer trials when CPU, memory or container capacity is insufficient. Concurrency is part of the frozen provider identity and verified execution conditions, so changing it requires a new run and does not permit reuse of evidence under the old identity.
+New Target profiles default to DSH `0.1.5-rc.3` or Pi `0.84.1`; existing profiles retain their exact revision. The current DSH release pins its HMR dependency upstream, without a Gear-only override. DSH requires an
 exact `deepseek@version:...` or commit; Pi uses `pi@version:...` or commit.
 The image must use an OCI sha256 digest. Gear checks the resolved harness source
 identity, capabilities and daemon status before execution. Fresh worker observation v2

@@ -24,6 +24,7 @@ class GEPA(StagedSearch):
         proposal_planner: ProposalPlanner = plan_proposals,
         ranker: CandidateRanker = rank_candidates,
         stop_rule: StopRule = stop_reason,
+        promotion_widths: tuple[int, ...] = (2, 1),
     ) -> None:
         super().__init__(
             parent_policy,
@@ -32,4 +33,5 @@ class GEPA(StagedSearch):
             ranker,
             stop_rule,
             ("local", "bridge", "global"),
+            promotion_widths,
         )

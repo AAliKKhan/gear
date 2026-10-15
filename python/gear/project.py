@@ -488,6 +488,8 @@ class Project:
                     "algorithm-policy-not-serializable",
                     "Use a named function or a dataclass policy with JSON configuration",
                 )
+        if type(algorithm) is GEPA:
+            options["promotion_widths"] = list(algorithm.promotion_widths)
         if type(algorithm) not in (GEPA, RandomSearch):
             configuration = getattr(algorithm, "configuration", {})
             validate("Json", configuration)

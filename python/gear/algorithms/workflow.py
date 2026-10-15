@@ -65,6 +65,17 @@ class StagedSearch:
     ranker: CandidateRanker
     stop_rule: StopRule
     stages: tuple[Literal["local", "bridge", "global"], ...]
+    promotion_widths: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.promotion_widths, (tuple, list))
+            or len(self.promotion_widths) != len(self.stages) - 1
+            or any(type(width) is not int or width < 1 for width in self.promotion_widths)
+        ):
+            raise ValueError("promotion_widths requires one positive integer per stage transition")
+        # JSON configuration uses arrays; keep the same immutable form as SDK configuration.
+        self.promotion_widths = tuple(self.promotion_widths)
 
     def step(self, view: SearchView, state: AlgorithmState) -> Decision:
         if state.version != 1 or not self.stages or self.stages[-1] != "global":
@@ -449,13 +460,10 @@ class StagedSearch:
         if ranked.incomplete:
             return self._record(self._next_batch(view, state, "incomplete seed evidence"), research)
         parent = str(state.data["parent"])
-        scores = dict(ranked.scores)
         candidates = tuple(
             candidate
             for candidate in ranked.candidate_ids
-            if candidate != parent
-            and candidate not in ranked.disqualified
-            and scores[candidate] > scores[parent]
+            if candidate != parent and candidate not in ranked.disqualified
         )
         scopes = objects(state.data.get("scopes", []))
         scope_id = str(state.data["scope_id"])
@@ -475,12 +483,17 @@ class StagedSearch:
         next_state = AlgorithmState(data=data)
         if not candidates:
             return self._record(
-                self._next_batch(view, next_state, "no candidate improves the comparable scope"),
+                self._next_batch(view, next_state, "no eligible candidate in the comparable scope"),
                 research,
             )
         index = integer(state.data["stage_index"]) + 1
         if index < len(self.stages):
-            return self._record(self._evaluate(view, next_state, candidates[:1], index), research)
+            # Expansion allocates research budget; it does not replace the parent.
+            # The ranker still enforces constraints and the runtime gates publication.
+            width = self.promotion_widths[index - 1]
+            return self._record(
+                self._evaluate(view, next_state, candidates[:width], index), research
+            )
         return self._record(self._next_batch(view, next_state, "batch complete"), research)
 
     def _next_batch(self, view: SearchView, state: AlgorithmState, reason: str) -> Decision:

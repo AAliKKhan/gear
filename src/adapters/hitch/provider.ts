@@ -44,6 +44,13 @@ export interface HitchProfile {
   baseImage: string
   passEnv: string[]
   timeoutMs: number
+  maxConcurrent?: number
+}
+export function hitchMaxConcurrent(profile: Pick<HitchProfile, 'maxConcurrent'>): number {
+  const value = profile.maxConcurrent === undefined ? 1 : profile.maxConcurrent
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new GearError('invalid-profile', 'maxConcurrent must be a positive safe integer')
+  return value
 }
 interface Group {
   key: string
@@ -143,6 +150,7 @@ export class HitchOperationProvider implements OperationProvider {
     signal: AbortSignal = new AbortController().signal,
   ): Promise<HitchOperationProvider> {
     signal.throwIfAborted()
+    hitchMaxConcurrent(profile)
     const connection = await inspectHitchConnection(profile, context.adapter, signal)
     const { capabilities, executionEnvironment, revisionIdentity } = connection
     profile = { ...profile, executable: await findExecutable(profile.executable) }
@@ -465,6 +473,7 @@ export class HitchOperationProvider implements OperationProvider {
       revisionIdentity: this.revisionIdentity,
       model: this.profile.model,
       timeoutMs: this.profile.timeoutMs,
+      maxConcurrent: hitchMaxConcurrent(this.profile),
       agentArgs: group.agentArgs,
       passEnv: this.profile.passEnv,
       environmentBinding: this.environmentBinding.binding_id,
@@ -518,7 +527,7 @@ export class HitchOperationProvider implements OperationProvider {
         '--infrastructure-retries',
         '0',
         '--max-concurrent',
-        '1',
+        String(hitchMaxConcurrent(this.profile)),
         '--timeout',
         `${this.profile.timeoutMs}ms`,
         ...group.agentArgs.flatMap((arg) => ['--agent-arg', arg]),

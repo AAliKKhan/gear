@@ -64,6 +64,42 @@ async function fixture(budget = 30, overrides: Partial<RunSpec> = {}) {
 }
 
 describe('Python decisions through the durable runtime', () => {
+  it.each([0, 0.25])('executes 4→2→1 and preserves the final minimum gain %s', async (minimumGain) => {
+    const { store, provider, runner } = await fixture(272, {
+      algorithm: { name: 'gepa', options: { promotion_widths: [2, 1] } },
+      seedTasks: Array.from({ length: 100 }, (_, index) => ({
+        id: `task-${index}`, family: index < 20 ? 'failure' : 'control', estimated_cost: 1,
+      })),
+      budget: { rounds: 1, maxEvaluations: 272, maxCandidates: 4, repetitions: 1 },
+      acceptance: { minimumGain, maxHeldOutRegression: 0 },
+    })
+    const submit = provider.submit.bind(provider)
+    provider.submit = async (request, signal) => {
+      const receipt = await submit(request, signal)
+      if (request.operation.kind === 'diagnose_seed')
+        receipt.result.data = { hypotheses: ['Repair A', 'Repair B', 'Repair C', 'Repair D'] }
+      receipt.evidence = receipt.evidence.map(cell => ({ ...cell,
+        score: cell.candidate_id === 'anchor' && Number(cell.task_id.slice(5)) < 20 ? 0 : 1,
+      }))
+      return receipt
+    }
+    const result = await runner.run('run', new AbortController().signal)
+    const evaluations = provider.calls.filter(call => call.operation.kind === 'evaluate_seed' &&
+      call.partition === 'seed' && call.operation.candidate_id !== 'anchor')
+    expect(['local', 'bridge', 'global'].map(stage =>
+      evaluations.filter(call => call.operation.scope.split(':')[0] === stage).length)).toEqual([4, 2, 1])
+    expect(evaluations.reduce((total, call) => total + call.slots.length, 0)).toBe(170)
+    expect(result.gate.status).toBe(minimumGain === 0 ? 'accepted' : 'rejected')
+    expect(result.championId).toBe(minimumGain === 0 ? 'r0-b0-candidate-0' : 'anchor')
+    expect(result.physicalAttempts).toBe(minimumGain === 0 ? 272 : 270)
+    if (minimumGain > 0)
+      expect(result.gate.reason).toBe('Seed improvement does not meet the frozen acceptance rule')
+    const calls = provider.calls.length
+    expect((await runner.run('run', new AbortController().signal)).digest).toBe(result.digest)
+    expect(provider.calls).toHaveLength(calls)
+    expect((await store.read('run')).spec.algorithm.options).toEqual({ promotion_widths: [2, 1] })
+  })
+
   it.each(['gepa', 'random-search'])('persists shared research traces from %s without final-gate evidence', async (name) => {
     const { store, runner } = await fixture(30, { algorithm: { name, options: {} } })
     const result = await runner.run('run', new AbortController().signal)

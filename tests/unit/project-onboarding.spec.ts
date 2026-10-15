@@ -86,6 +86,14 @@ it('selects project profiles through the controller and preserves unrelated conf
   expect(await controller.invoke('profile.list')).toMatchObject({ profiles: [{ name: 'custom', kind: 'process', valid: true }] })
   await controller.dispose()
 })
+it('persists explicit Hitch concurrency through profile creation', async () => {
+  const controller = new ProjectController(new ProjectApplication(root, { provider: async () => { throw new Error('Not called') } }))
+  const options = { kind: 'hitch', model: 'fixture', adapter: 'dsh', executable: process.execPath, root: join(root, 'hitch'), baseImage: image, maxConcurrent: 4 }
+  await controller.invoke('profile.create', { name: 'parallel', options })
+  expect(await profile('parallel')).toMatchObject({ kind: 'hitch', maxConcurrent: 4 })
+  await expect(controller.invoke('profile.create', { name: 'bad', options: { ...options, maxConcurrent: 0 } })).rejects.toMatchObject({ code: 'invalid-profile' })
+  await controller.dispose()
+})
 it('reports missing credentials separately and never calls a model or exposes credential values', async () => {
   await hitch(); await codex(); await selectDefaultProfile('meta', 'meta')
   let result = await doctor(root)

@@ -4,7 +4,7 @@ import { isAbsolute, join } from 'node:path'
 import { GearError } from '../domain/errors.js'
 import { canonicalDigest } from '../domain/canonical.js'
 import type { OperationProfile } from '../adapters/process/operation-provider.js'
-import type { HitchProfile } from '../adapters/hitch/provider.js'
+import { hitchMaxConcurrent, type HitchProfile } from '../adapters/hitch/provider.js'
 import { configuration, type CodexConfiguration } from '../adapters/codex/contracts.js'
 import { publishFile } from '../adapters/storage/atomic.js'
 import { withFileLock } from '../adapters/storage/file-lock.js'
@@ -31,7 +31,17 @@ export function validateProfile(input: unknown): Profile {
   const kind = value.kind
   const keys =
     kind === 'hitch'
-      ? ['kind', 'executable', 'root', 'harnessRef', 'model', 'baseImage', 'passEnv', 'timeoutMs']
+      ? [
+          'kind',
+          'executable',
+          'root',
+          'harnessRef',
+          'model',
+          'baseImage',
+          'passEnv',
+          'timeoutMs',
+          'maxConcurrent',
+        ]
       : kind === 'codex'
         ? ['kind', 'configuration', 'passEnv']
         : ['command', 'workingDirectory', 'configuration', 'passEnv', 'timeoutMs']
@@ -57,6 +67,7 @@ export function validateProfile(input: unknown): Profile {
     )
       throw new GearError('invalid-profile', 'timeoutMs must be between 100 and 86400000')
     if (kind === 'hitch') {
+      hitchMaxConcurrent(value as unknown as HitchProfile)
       if (
         ['executable', 'root', 'harnessRef', 'model', 'baseImage'].some(
           (key) => typeof value[key] !== 'string' || !(value[key] as string).trim(),

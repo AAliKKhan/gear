@@ -12,7 +12,7 @@
 | 任务范围和评分权重 | `TaskSampler` | `gepa/sampling.py` | `random_search/sampling.py` |
 | 消费诊断、规划候选 | `ProposalPlanner` | `gepa/proposal.py` | `random_search/proposal.py` |
 | 在完整共同范围比较候选 | `CandidateRanker` | `gepa/ranking.py` | `random_search/ranking.py` |
-| 阶段顺序 | `SearchAlgorithm` | `gepa/algorithm.py` | `random_search/algorithm.py` |
+| 阶段顺序与晋级宽度 | `SearchAlgorithm` | `gepa/algorithm.py` | `random_search/algorithm.py` |
 | 结束条件 | `StopRule` | `gepa/stopping.py` | `random_search/stopping.py` |
 
 表中路径相对于 [`python/gear/algorithms`](../python/gear/algorithms)。合同在 [`contracts.py`](../python/gear/algorithms/contracts.py)，可复用流程在 [`workflow.py`](../python/gear/algorithms/workflow.py)。新增算法可以组合这些合同，也可以直接实现 `step`，不需要修改 TS 的操作类型或状态机。
@@ -75,8 +75,13 @@ from gear.algorithms.gepa.sampling import GEPASampler
 algorithm = GEPA(
     parent_policy=ScopedFrontier(batch_count=2, champion_probability=0.25),
     sampler=GEPASampler(bridge_ratio=0.5),
+    promotion_widths=(2, 1),
 )
 ```
+
+`promotion_widths` 为每次阶段转换指定一个正整数；GEPA 默认 `(2, 1)` 分别限制每个父代批次进入 bridge 和 global 的候选数。每批候选在同一 local scope 排名，最多两个扩评，再在同一 bridge scope 取最多一个。扩评不要求分数严格高于父代，但会排除 `RankingPlan.disqualified`；任一参与者不完整时整批不晋级。最终接受规则由运行层独立执行。
+
+晋级宽度、父代批数和整个 run 的 `budget.max_candidates` 生成上限相互独立；上例两个父代批次分别使用 `(2, 1)`，不能据此推导整个 run 只评测一个 global 候选。完整的单批 4 → 2 → 1 YAML 配置与 170/1,700 次候选执行量的适用条件见[算法示例](guide/zh-CN/example-algorithm.md)。CLI 使用 `algorithm: {name: gepa, options: {promotion_widths: [2, 1]}}`；SDK 使用 `GEPA(promotion_widths=(2, 1))`。两种入口都把宽度保存到算法配置并在 admission 时冻结，恢复不重新读取可变配置。
 
 RandomSearch 使用均匀父代抽样及完整 seed 评测，复用通用证据计算和有限运行检查。它不会导入 GEPA 的策略模块。
 
@@ -109,7 +114,7 @@ SDK 冻结命名函数/类所在文件、声明的 `source_dependencies` 和 JSO
 
 新 wire schema 的单一来源是 [`contracts/algorithm-v1.schema.json`](../contracts/algorithm-v1.schema.json)。通过 `npm run generate:contracts` 生成两种语言的传输类型。作者继续使用公开 dataclass，不手写协议消息。
 
-生产 worker 只读取冻结源码、批准的 Python 运行依赖和独立 scratch，禁用网络。决策、状态和 operation IDs 在副作用前一次保存。已保存决策不重新抽样；外部结果未知时先 inspect，再决定是否重试。改源码或配置创建新身份，不修改历史结果来通过恢复校验。
+生产 worker 只读取冻结源码、批准的 Python 运行依赖和独立 scratch，禁用网络。决策、状态和 operation IDs 在副作用前一次保存。已保存决策不重新抽样；外部结果未知时先 inspect，再决定是否重试。改源码会改变实现身份；新 run 冻结当时的配置选项，已有 run 恢复沿用原选项，不修改历史结果来通过恢复校验。
 
 ## 当前策略与固定投影的边界
 
@@ -128,5 +133,7 @@ verifier 过程组件验证、失败代码诊断与范围汇总在 `algorithms/v
 旧 staged-search、RefineService、组件执行装配及配套 Python 策略夹具已删除。原实现由 Git 历史保留；当前回归直接测试 `gear.algorithms`、Project runtime 与生产 adapter，不再编译或运行一套旧执行器。
 
 迁移会改变实现身份。旧 TS 决策不能在新 Python 实现下静默恢复，历史记录保持原样。当前算法的确定性随机、排名、完整范围分母、保护规则及冻结恢复由生产路径测试验证。
+
+当前 Python 的 `(2, 1)` 恢复了单批四候选场景的 4 → 2 → 1 扩评宽度，但不是历史算法的完整等价迁移。历史实现按失败类别建立独立 local scope、每组提名后轮转分配 bridge 名额；当前流程让一个父代批次共用 local scope 并排名筛选，阶段比较、最终提名与接受规则也有差异。仓库保留的 Marketing 实验结果属于其固定历史版本，不能当作当前 Python 实现的效果或成本实测。
 
 公开 Project 路径和独立安装包的验证范围见[重构记录](refactor-progress.zh-CN.md)。

@@ -11,6 +11,7 @@ import { DshHarnessAdapter } from '../../src/adapters/dsh/harness.js'
 import { decodeHitchTrials } from '../../src/adapters/hitch/evidence.js'
 import type { OperationRequest } from '../../src/ports/operations.js'
 import { resolveProjectObjective } from '../../src/application/objective.js'
+import { validateProfile } from '../../src/application/profile-store.js'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -379,7 +380,7 @@ it('projects independent assertions from the original trial without inferring th
   expect(decodeHitchTrials(result, evaluate, ['a'], 0).evidence[0]!.assertions?.[0]?.status).toBe('missing')
 })
 
-async function controlledProvider(initial: Record<string, unknown> = {}) {
+async function controlledProvider(initial: Record<string, unknown> = {}, maxConcurrent?: number) {
   const root = await mkdtemp(join(tmpdir(), 'gear-ordered-hitch-'))
   roots.push(root)
   const executable = join(root, 'hitch.mjs'),
@@ -403,6 +404,7 @@ async function controlledProvider(initial: Record<string, unknown> = {}) {
       baseImage: 'python@sha256:' + '1'.repeat(64),
       passEnv: [],
       timeoutMs: 3000,
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
     },
     {
       directory: join(root, 'submissions'),
@@ -431,6 +433,32 @@ const repeatedRequest = (): OperationRequest => ({
     { taskId: 'a', repetition: 0 },
     { taskId: 'a', repetition: 1 },
   ],
+})
+
+it.each([undefined, 4])('submits and accepts the configured Hitch concurrency %s', async (maxConcurrent) => {
+  const f = await controlledProvider({}, maxConcurrent)
+  expect(validateProfile(f.provider.profile)).toEqual(f.provider.profile)
+  const receipt = await f.provider.submit(request, f.signal)
+  expect(receipt.physicalAttempts).toBe(1)
+  expect((await f.state()).job.request.max_concurrent).toBe(maxConcurrent ?? 1)
+  expect(await f.provider.inspect(request, f.signal)).toMatchObject({ state: 'complete' })
+})
+
+it('binds concurrency to provider identity and rejects a downgraded execution', async () => {
+  const f = await controlledProvider({ inspectionMutations: [{ path: ['request', 'max_concurrent'], value: 1 }] }, 4)
+  const sequential = await HitchOperationProvider.connect({ ...f.provider.profile, maxConcurrent: 1 }, f.provider.context)
+  expect(sequential.identity).not.toBe(f.provider.identity)
+  await expect(f.provider.submit(request, f.signal)).rejects.toMatchObject({ code: 'hitch-result-identity' })
+  await expect(readFile(join(f.provider.context.directory, request.operationId.slice(7), 'receipt.json')))
+    .rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it.each([0, -1, 1.5, '4', null, true, Number.MAX_SAFE_INTEGER + 1])('rejects invalid Hitch profile concurrency %s', (maxConcurrent) => {
+  expect(() => validateProfile({
+    kind: 'hitch', executable: '/bin/hitch', root: '/tmp/hitch',
+    harnessRef: 'deepseek@version:0.1.5-rc.3', model: 'fixture',
+    baseImage: 'python@sha256:' + '1'.repeat(64), passEnv: [], timeoutMs: 3000, maxConcurrent,
+  })).toThrow('maxConcurrent must be a positive safe integer')
 })
 
 it.each([

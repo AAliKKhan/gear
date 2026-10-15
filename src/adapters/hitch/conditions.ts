@@ -12,6 +12,7 @@ export interface HitchExecutionConditions {
   revisionIdentity: string
   model: string
   timeoutMs: number
+  maxConcurrent: number
   agentArgs: string[]
   passEnv: string[]
   environmentBinding: string
@@ -65,7 +66,7 @@ export function assertHitchExecutionConditions(
     !expected.artifactPins.length ||
     canonicalDigest(request.artifact_pins) !== canonicalDigest(expected.artifactPins) ||
     request.attempts !== 1 ||
-    request.max_concurrent !== 1 ||
+    request.max_concurrent !== expected.maxConcurrent ||
     request.infrastructure_retries !== 0 ||
     request.timeout_ms !== expected.timeoutMs ||
     !strings(request.agent_args, expected.agentArgs) ||

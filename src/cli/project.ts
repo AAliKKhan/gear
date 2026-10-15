@@ -162,11 +162,13 @@ export async function projectCommand(argv: string[]): Promise<boolean> {
           baseImage: take('--image'),
           passEnv: take('--pass-env')?.split(',').filter(Boolean),
           timeoutMs: take('--timeout-ms'),
+          maxConcurrent: take('--max-concurrent'),
           authHome: take('--auth-home'),
           allowedDomains: take('--allowed-domains')?.split(',').filter(Boolean),
         }).filter(([, value]) => value !== undefined),
       )
       if (options.timeoutMs !== undefined) options.timeoutMs = Number(options.timeoutMs)
+      if (options.maxConcurrent !== undefined) options.maxConcurrent = Number(options.maxConcurrent)
       if (args.length !== 1 || args[0]!.startsWith('--'))
         throw new GearError(
           'invalid-profile-command',

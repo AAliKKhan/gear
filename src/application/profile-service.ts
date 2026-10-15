@@ -47,6 +47,7 @@ export interface CreateProfileOptions {
   baseImage?: string
   passEnv?: string[]
   timeoutMs?: number
+  maxConcurrent?: number
   authHome?: string
   allowedDomains?: string[]
 }
@@ -61,7 +62,7 @@ export async function createProfile(name: string, options: CreateProfileOptions)
   const common = ['kind', 'model', 'executable', 'passEnv', 'timeoutMs']
   const keys =
     options.kind === 'hitch'
-      ? [...common, 'adapter', 'root', 'harnessRef', 'baseImage']
+      ? [...common, 'adapter', 'root', 'harnessRef', 'baseImage', 'maxConcurrent']
       : [...common, 'authHome', 'allowedDomains']
   if (Object.keys(options).some((key) => !keys.includes(key)))
     throw new GearError('invalid-profile-options', 'Unknown options for this profile kind')
@@ -77,6 +78,7 @@ export async function createProfile(name: string, options: CreateProfileOptions)
       baseImage: await pinImage(options.baseImage ?? runtimeMatrix.baseImage),
       passEnv: options.passEnv ?? [],
       timeoutMs: options.timeoutMs ?? 1_800_000,
+      ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
     } as const
     assertProfileRole(value, 'target', options.adapter)
     return saveProfile(name, value)

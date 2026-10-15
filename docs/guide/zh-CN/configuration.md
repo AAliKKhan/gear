@@ -19,13 +19,15 @@ budget: {rounds: 1, max_evaluations: 40}
 | 字段 | 当前含义 |
 | --- | --- |
 | `target.adapter` | `dsh` 或 `pi` |
-| `algorithm` | `gepa`、`random-search` 或 Python entrypoint；SDK 可传可替换策略实例 |
+| `algorithm` | `gepa`、`random-search`、Python entrypoint，或 `{name: gepa, options: {promotion_widths: [2, 1]}}`；SDK 可传可替换策略实例 |
 | `objective.metric` | `{metric: pass_rate}` 为默认简写；高级目标使用 `objective.terms` 和 `objective.constraints` |
 | `validation.mode` | `holdout` 要求独立任务；显式 `research` 标记同集研究 |
 | `budget.rounds` | 默认 1 |
 | `budget.max_candidates` | 整个 run 的候选上限，默认 2 |
 | `budget.repetitions` | 每题重复数，默认 1 |
 | `budget.max_evaluations` | 整个 run 的物理 attempt 上限，默认 40，包含 baseline、候选、最终验证和失败修补 |
+
+GEPA 默认的 `promotion_widths: [2, 1]` 限制每个父代批次进入 bridge、global 的候选数，不设置生成预算或父代批数。[4 → 2 → 1 示例](example-algorithm.md)显式设置 `max_candidates: 4`；项目默认生成上限仍为 2。算法选项在 admission 时冻结，恢复沿用原值。
 
 未知是否已执行的请求占用预留；resume 沿用原账本。当前项目入口没有美元硬上限，缺失用量不能当成零。报告只在所有可能已执行的操作都提供同一字段时合计该字段；任何缺失、null 或仍未返回的提交使总值保持 null。尚未提交的预约不计入已消耗用量，运行层完全复用当前 run 证据而未调用 provider 时明确记录新增用量为零。费用估算和实际账单分别保存。决策步数上限按整个 run 计数，resume 不重置。
 
@@ -126,7 +128,9 @@ protection:
 
 process 必须报告真实实现身份和能力，并持久实现 submit/inspect/cancel。仅把可执行文件路径填进去并不构成可用 provider。`passEnv` 是变量名列表，不在项目锁文件中保存变量值。
 
-Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、`harnessRef`、`model`、`baseImage`、`passEnv`、`timeoutMs`。新建 Target profile 默认使用 DSH `0.1.5-rc.3` 或 Pi `0.84.1`；既有 profile 保留其精确版本。当前 DSH 版本由上游固定 HMR 依赖，无需 Gear 专用覆盖。DSH 的 harnessRef 必须是确切 `deepseek@version:...` 或 commit，Pi 使用 `pi@version:...` 或 commit；baseImage 固定 OCI sha256。运行前核对解析后的 harness 源码身份、能力和 daemon 状态，并用 fresh worker observation v2 绑定 Hitch controller、Harbor 可执行文件和 Docker 引擎的观测身份。评估明确提交到 `local-docker`；新提交前和保存回执前重新观测，变化时拒绝继续接纳。回包还必须匹配 controller runtime 和执行 provider。接纳回包及补取原材料时，还核对实际请求中的模型、载体参数、凭据变量名范围、重复/并发/重试次数和超时；不一致的结果不会接纳。计划、结果及 work item 的 prepared artifact、入口/目录摘要、任务映射和平台/Node 合同也必须一致；同一评估的重复试验不能使用不同依赖。原材料补取保留原始 artifact 证据。
+Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、`harnessRef`、`model`、`baseImage`、`passEnv`、`timeoutMs`，以及可选的 `maxConcurrent`。`maxConcurrent` 是正整数，默认 `1`；设为 `4`（或创建时使用 `gear profile create … --max-concurrent 4`）表示每次评估最多请求四个 trial 并发。实际并发还受 Hitch 的 CPU、内存和容器容量限制。并发属于冻结的 provider 身份和执行条件，修改后须新建运行，不能复用旧身份下的评测证据。
+
+新建 Target profile 默认使用 DSH `0.1.5-rc.3` 或 Pi `0.84.1`；既有 profile 保留其精确版本。当前 DSH 版本由上游固定 HMR 依赖，无需 Gear 专用覆盖。DSH 的 harnessRef 必须是确切 `deepseek@version:...` 或 commit，Pi 使用 `pi@version:...` 或 commit；baseImage 固定 OCI sha256。运行前核对解析后的 harness 源码身份、能力和 daemon 状态，并用 fresh worker observation v2 绑定 Hitch controller、Harbor 可执行文件和 Docker 引擎的观测身份。评估明确提交到 `local-docker`；新提交前和保存回执前重新观测，变化时拒绝继续接纳。回包还必须匹配 controller runtime 和执行 provider。接纳回包及补取原材料时，还核对实际请求中的模型、载体参数、凭据变量名范围、重复/并发/重试次数和超时；不一致的结果不会接纳。计划、结果及 work item 的 prepared artifact、入口/目录摘要、任务映射和平台/Node 合同也必须一致；同一评估的重复试验不能使用不同依赖。原材料补取保留原始 artifact 证据。
 
 运行计划连接 provider 时，Gear 通过该 Hitch 安装的公开 SDK 编译任务平台声明并准备对应的 Harbor artifact。准备前后核对 SDK 与 daemon 观测到的 controller 和 Docker/Harbor 环境；实际 artifact、入口/目录摘要与逐任务平台绑定进入 provider/evaluation identity，供跨 run baseline 比较。新物理提交前再次校验缓存文件，回执必须匹配事先冻结的绑定。首次准备可能下载包和运行 Docker 构建器，单次准备/复核限制为 30 分钟；不创建评估作业或模型请求。`doctor` 保持只读，不执行 artifact 构建。
 

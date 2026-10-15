@@ -138,6 +138,7 @@ export class ProjectController {
         'baseImage',
         'passEnv',
         'timeoutMs',
+        'maxConcurrent',
         'authHome',
         'allowedDomains',
       ])
