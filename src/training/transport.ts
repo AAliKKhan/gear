@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createReadStream } from 'node:fs'
-import { lstat, mkdir, readFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -100,6 +100,47 @@ export class ModelNodeTransport {
       })
     }
     return `http://127.0.0.1:${gateway.localPort}`
+  }
+  /** Explicit owner cleanup only. Closing a forward never stops the model service. */
+  async closeGateway(controllerDirectory: string, nodePort: number): Promise<{ closed: boolean; reason?: 'local' | 'missing-record' | 'missing-socket' }> {
+    const { gateway, transport } = this.connection
+    requireContract(this.identity && nodePort === gateway.nodePort, 'gateway-port-drift', 'node gateway differs from its explicit stable route')
+    if (transport.type === 'local') return { closed: false, reason: 'local' }
+    requireContract(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(transport.host), 'invalid-ssh-host', 'SSH host must be a configured Host alias')
+    const identity = digestJson({ node: this.identity, connection: this.connection })
+    const directory = join('/tmp', `gear-node-${process.getuid?.() ?? 'user'}-${digestJson(controllerDirectory).slice(-12)}`)
+    const socket = join(directory, identity.slice(-20) + '.sock')
+    const record = join(controllerDirectory, 'node-routes', identity.slice(7) + '.json')
+    const expected = { identity, node: this.identity, connection: this.connection }
+    return withTrainingFileLock(record + '.lock', async () => {
+      const permissions = await lstat(record).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (!permissions) return { closed: false, reason: 'missing-record' }
+      requireContract(permissions.isFile() && !permissions.isSymbolicLink() && (permissions.mode & 0o077) === 0
+        && permissions.size <= 64 * 1024 && (!process.getuid || permissions.uid === process.getuid()),
+      'unsafe-tunnel-record', 'SSH route record must be a private regular file owned by this user')
+      requireContract(digestJson(JSON.parse(await readFile(record, 'utf8'))) === digestJson(expected),
+        'tunnel-owner-drift', 'SSH route record differs from this node, connection or identity')
+      const folder = await lstat(directory).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (!folder) return { closed: false, reason: 'missing-socket' }
+      requireContract(folder.isDirectory() && !folder.isSymbolicLink() && (folder.mode & 0o077) === 0
+        && (!process.getuid || folder.uid === process.getuid()), 'unsafe-tunnel-directory', 'SSH socket directory must be private to its owner')
+      const endpoint = await lstat(socket).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (!endpoint) return { closed: false, reason: 'missing-socket' }
+      requireContract(endpoint.isSocket() && !endpoint.isSymbolicLink() && (endpoint.mode & 0o077) === 0
+        && (!process.getuid || endpoint.uid === process.getuid()), 'unsafe-tunnel-socket', 'SSH control socket must be private to its owner')
+      try {
+        await promisify(execFile)('ssh', ['-S', socket, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-O', 'exit', '--', transport.host], { timeout: 30_000 })
+      } catch {
+        const remaining = await lstat(socket).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+        if (!remaining) return { closed: false, reason: 'missing-socket' }
+        throw new TrainingContractError('node-route-close-failed', 'SSH gateway close was not acknowledged; retain its owner record for retry')
+      }
+      // Never unlink a control socket ourselves or remove a changed owner record.
+      requireContract(digestJson(JSON.parse(await readFile(record, 'utf8'))) === digestJson(expected),
+        'tunnel-owner-drift', 'SSH route owner changed during close')
+      await rm(record)
+      return { closed: true }
+    })
   }
   private binary(action: 'cas-import' | 'cas-export') {
     requireContract(this.identity, 'node-not-resolved', 'pin a model-node generation before transferring artifacts')
