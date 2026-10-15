@@ -48,6 +48,20 @@ class BenchmarkTests(unittest.TestCase):
                     compile_benchmark(root, {"version": 1, "source": "tasks.csv"})
                 self.assertIn("tasks.csv:3", error.exception.location)
 
+    def test_nonfinite_and_duplicate_json_outputs_fail_even_in_unasserted_fields(self):
+        for extra in ["NaN", "Infinity", "-Infinity", "1e999", "[NaN]", '{"nested":Infinity}']:
+            actual = '{"answer":42,"other":' + extra + '}'
+            with self.subTest(extra=extra):
+                direct = score_output(actual, {"/answer": 42}, {"kind": "json"})
+                file = score_output("", {"result.json": {"/answer": 42}},
+                                    {"kind": "files"}, {"result.json": actual})
+                self.assertEqual((direct.status, direct.value), ("valid", 0.0))
+                self.assertEqual((file.status, file.value), ("valid", 0.0))
+        self.assertEqual(score_output('{"answer":0,"answer":42}', {"/answer": 42},
+                                      {"kind": "json"}).value, 0.0)
+        self.assertEqual(score_output('{"answer":42,"other":1e100}', {"/answer": 42},
+                                      {"kind": "json"}).value, 1.0)
+
     def test_valid_zero_json_type_and_file_assertions(self):
         self.assertEqual(score_output("no", "yes", {"kind": "text"}).value, 0)
         self.assertEqual(

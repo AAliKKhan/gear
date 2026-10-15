@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { canonicalDigest } from '../../domain/canonical.js'
 import { GearError } from '../../domain/errors.js'
 import { controllerObservation, providerEnvironment } from './environment.js'
+import { hitchEnvironmentTimeoutMs } from './settings.js'
 
 export const evaluationProvider = 'local-docker'
 export type ObservationCall = (
@@ -47,7 +48,7 @@ export async function observeEvaluationEnvironment(call: ObservationCall, signal
   const response = await call(
     ['worker', 'observe', evaluationProvider, '--nonce', nonce, '--json'],
     signal,
-    55_000,
+    hitchEnvironmentTimeoutMs,
   )
   const environment = providerEnvironment(response, {
     nonce,

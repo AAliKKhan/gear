@@ -8,6 +8,7 @@ export interface ProjectConfig {
   benchmark: string
   target: { adapter: 'dsh' | 'pi'; path: string; profile: string }
   meta: { profile: string }
+  sandbox?: { linux_isolation: 'seccomp' | 'bubblewrap-only' }
   generation?: GenerationConfiguration
   algorithm: string | AlgorithmConfig
   objective: { metric: 'pass_rate' } | ObjectiveDefinition

@@ -8,15 +8,12 @@ export function validateDecision(view: SearchView, decision: Decision): void {
   const fail = (message: string): never => {
     throw new GearError('invalid-algorithm-decision', message, { run_id: view.run_id })
   }
-  if (!decision.reason.trim() || !decision.operations.length || decision.operations.length > 64)
-    fail('Decision needs a reason and 1..64 operations')
+  if (!decision.reason.trim() || !decision.operations.length)
+    fail('Decision needs a reason and at least one operation')
   const candidateIds = new Set(view.candidates.map((candidate) => candidate.id)),
     generated = new Set<string>()
   const tasks = new Set(view.tasks.map((task) => task.id))
-  if (
-    (decision.research?.length ?? 0) > 64 ||
-    Buffer.byteLength(JSON.stringify(decision.research ?? [])) > 2 * 1024 * 1024
-  )
+  if (Buffer.byteLength(JSON.stringify(decision.research ?? [])) > 2 * 1024 * 1024)
     fail('Research traces exceed the per-decision limit')
   for (const record of decision.research ?? []) {
     if (

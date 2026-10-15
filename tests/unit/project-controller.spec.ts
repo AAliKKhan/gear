@@ -79,6 +79,17 @@ it('explains generation limits and rejects an unsupported Meta before baseline s
   expect(provider.calls).toHaveLength(0)
 })
 
+it('freezes an explicit isolation mode and rejects unknown modes', async () => {
+  const { project } = await fixture()
+  const file = join(project, 'gear.yaml'), original = await readFile(file, 'utf8')
+  await writeFile(file, original + '\nsandbox: {linux_isolation: bubblewrap-only}\n')
+  const resolved = await resolveProject(project)
+  expect(resolved.config.sandbox).toEqual({ linux_isolation: 'bubblewrap-only' })
+  expect(resolved.origins['sandbox.linux_isolation']).toBe('gear.yaml')
+  await writeFile(file, original + '\nsandbox: {linux_isolation: disabled}\n')
+  await expect(resolveProject(project)).rejects.toMatchObject({ code: 'invalid-config' })
+})
+
 it('admits once, rejects conflicting retries, and resumes after controller shutdown without resubmission', async () => {
   const { app, provider, controller } = await fixture()
   const accepted = await controller.call('run.evaluate', { split: 'seed', limit: 1 }, 'same-request') as { run_id: string }

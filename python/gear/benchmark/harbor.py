@@ -12,7 +12,9 @@ from gear.canonical import digest
 from .compiler import BenchmarkError, bytes_digest
 from .manifest import restore_metadata, seal_harbor
 from .payload import content_bytes
+from .payload import source_bytes as payload_source_bytes
 from .runtime_limits import source_bytes, template_timeouts
+from .scorers import source_bytes as scorer_source_bytes
 
 VERIFIER = """import json, os, sys
 from dataclasses import asdict
@@ -82,7 +84,7 @@ def compile_harbor(benchmark: dict, destination: str, task_ids: list[str], base_
             "runtime limits implementation changed; use the admitted runtime", "runtime_limits"
         )
     scorer = Path(__file__).with_name("scorers.py")
-    if bytes_digest(scorer.read_bytes()) != benchmark["scorer_source_digest"]:
+    if bytes_digest(scorer_source_bytes()) != benchmark["scorer_source_digest"]:
         raise BenchmarkError("scorer implementation changed; use the admitted runtime", "scorer")
     python_scorer = Path(__file__).with_name("python_scorer.py")
     if any(verifier["rule"]["kind"] == "python" for verifier in benchmark["verifiers"].values()):
@@ -112,9 +114,7 @@ def compile_harbor(benchmark: dict, destination: str, task_ids: list[str], base_
                 raise BenchmarkError(
                     "native importer changed; use the admitted runtime", "native_source_digest"
                 )
-            if bytes_digest(Path(__file__).with_name("payload.py").read_bytes()) != benchmark.get(
-                "payload_source_digest"
-            ):
+            if bytes_digest(payload_source_bytes()) != benchmark.get("payload_source_digest"):
                 raise BenchmarkError(
                     "native payload runtime changed; use the admitted runtime",
                     "payload_source_digest",
@@ -218,6 +218,7 @@ def compile_harbor(benchmark: dict, destination: str, task_ids: list[str], base_
         (runtime.parent / "__init__.py").write_text("")
         (runtime / "__init__.py").write_text("")
         (runtime / "scorers.py").write_bytes(scorer.read_bytes())
+        (runtime / "source.py").write_bytes(scorer.with_name("source.py").read_bytes())
         if verifier["rule"]["kind"] == "python":
             (runtime / "python_scorer.py").write_bytes(python_scorer.read_bytes())
         if llm:

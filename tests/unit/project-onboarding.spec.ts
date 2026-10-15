@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ProjectController } from '../../src/application/project-controller.js'
 import { ProjectApplication } from '../../src/application/project-service.js'
 import { createProfile } from '../../src/application/profile-service.js'
-import { defaultProfiles, processProfile, profile, saveProfile, selectDefaultProfile } from '../../src/application/profile-store.js'
+import { defaultProfiles, processProfile, profile, saveProfile, selectDefaultProfile, validateProfile } from '../../src/application/profile-store.js'
 import { initProject } from '../../src/application/init.js'
 import { resolveProject } from '../../src/application/project-config.js'
 import { doctor } from '../../src/application/doctor.js'
@@ -31,7 +31,22 @@ async function executable(name: string, source: string) {
 }
 const image = `python@sha256:${'1'.repeat(64)}`
 const processSettings = () => ({ command: [process.execPath, resolve('tests/fixtures/project-provider.mjs')], workingDirectory: root, passEnv: [], configuration: {}, timeoutMs: 30_000 })
-async function codex(name = 'meta', authHome?: string) {
+
+it('creates default and configured preparation profiles through the public CLI', async () => {
+  const binary = await executable('hitch-profile', '')
+  for (const [name, flags, expected] of [
+    ['defaults', [], { maxConcurrent: 4, preparationTimeoutMs: 1_800_000, setupTimeoutMs: 1_800_000 }],
+    ['configured', ['--max-concurrent', '64', '--preparation-timeout-ms', '1200000', '--setup-timeout-ms', '0'],
+      { maxConcurrent: 64, preparationTimeoutMs: 1_200_000, setupTimeoutMs: 0 }],
+  ] as const) {
+    execFileSync(process.execPath, [resolve('lib/cli.js'), '--project', root, 'profile', 'create', name,
+      '--kind', 'hitch', '--adapter', 'dsh', '--model', 'fixture-model', '--executable', binary,
+      '--hitch-root', join(root, 'hitch-state'), '--image', image, ...flags, '--json'], { encoding: 'utf8' })
+    expect(await profile(name)).toMatchObject(expected)
+  }
+})
+
+async function codex(name = 'meta', authHome?: string, passEnv?: string[]) {
   const binary = await executable('codex', `
 if (process.argv.includes('--version')) console.log('codex-cli 0.159.3');
 else if (process.argv.slice(2).join(' ') === 'login status') {
@@ -39,7 +54,7 @@ else if (process.argv.slice(2).join(' ') === 'login status') {
   const fs = require('node:fs');
   process.exit(fs.existsSync(require('node:path').join(process.env.CODEX_HOME,'auth.json')) ? 0 : 1);
 } else throw new Error('Doctor attempted a model call');`)
-  await createProfile(name, { kind: 'codex', model: 'test-model', executable: binary, ...(authHome ? { authHome } : {}) })
+  await createProfile(name, { kind: 'codex', model: 'test-model', executable: binary, ...(authHome ? { authHome } : {}), ...(passEnv ? { passEnv } : {}) })
   return name
 }
 async function hitch() {
@@ -53,6 +68,19 @@ else { require('node:fs').mkdirSync(process.argv[3], {recursive:true});
   await createProfile('target', { kind: 'hitch', model: 'test-model', adapter: 'pi', executable: binary, root: join(root, 'hitch-state'), baseImage: image, passEnv: ['OPENAI_API_KEY'] })
   await selectDefaultProfile('target', 'target')
 }
+
+it('allows explicit Codex proxy variable names while rejecting arbitrary host environment', async () => {
+  const binary = await executable('codex-proxy', '')
+  const passEnv = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']
+  vi.stubEnv('HTTPS_PROXY', 'http://fixture:PROXY_CREDENTIAL_CANARY@127.0.0.1:12345')
+  await createProfile('proxy-meta', { kind: 'codex', model: 'fixture-model', executable: binary, authHome: root, passEnv })
+  const saved = await profile('proxy-meta')
+  expect(saved.passEnv).toEqual(passEnv)
+  expect(processProfile(saved as Parameters<typeof processProfile>[0]).passEnv).toEqual(passEnv)
+  expect(await readFile(join(root, 'profiles/proxy-meta.json'), 'utf8')).not.toContain('PROXY_CREDENTIAL_CANARY')
+  for (const name of ['NODE_OPTIONS', 'PATH', 'GEAR_META_SECRET', 'HTTP_PROXY=value'])
+    expect(() => validateProfile({ ...saved, passEnv: [name] })).toThrow()
+})
 it('creates native profiles, pins the matching runtime and initializes selected profiles', async () => {
   await hitch(); await codex(); await selectDefaultProfile('meta', 'meta')
   const location = join(root, 'project')
@@ -95,7 +123,8 @@ it('persists explicit Hitch concurrency through profile creation', async () => {
   await controller.dispose()
 })
 it('reports missing credentials separately and never calls a model or exposes credential values', async () => {
-  await hitch(); await codex(); await selectDefaultProfile('meta', 'meta')
+  await hitch(); await codex('meta', undefined, ['CODEX_API_KEY', 'HTTP_PROXY']); await selectDefaultProfile('meta', 'meta')
+  vi.stubEnv('HTTP_PROXY', 'http://fixture:SECRET_PROXY@127.0.0.1:12345')
   let result = await doctor(root)
   expect(result.checks.every((check) => check.status === 'passed'), JSON.stringify(result.checks)).toBe(true)
   expect(result.authentication).toMatchObject({ target: { status: 'not_configured' }, meta: { status: 'not_configured' } })
@@ -104,6 +133,7 @@ it('reports missing credentials separately and never calls a model or exposes cr
   result = await doctor(root)
   expect(result.ready_for_seed_smoke).toBe(true)
   expect(result.ready_for_refine_smoke).toBe(true)
+  expect(result.authentication.meta).toEqual({ status: 'environment_present', names: ['CODEX_API_KEY'] })
   expect(result.model_access).toBe('not_checked')
   expect(result.model_requests).toBe(0)
   expect(result.benchmark).toBe('not_run')

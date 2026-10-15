@@ -2,6 +2,7 @@ import { canonicalDigest } from '../../domain/canonical.js'
 import { GearError } from '../../domain/errors.js'
 import type { HitchProfile } from './provider.js'
 import type { ObservationCall } from './observation.js'
+import { hitchCredentialMarginMs, hitchSettings } from './settings.js'
 
 export interface HitchEnvironmentBinding {
   schema_version: '1'
@@ -18,7 +19,8 @@ export async function prepareEnvironmentBinding(
   signal: AbortSignal,
 ): Promise<HitchEnvironmentBinding> {
   // Hitch's default environment setup allowance is separate from the agent deadline.
-  const validity = profile.timeoutMs + 30 * 60_000
+  const settings = hitchSettings(profile)
+  const validity = profile.timeoutMs + settings.setupTimeoutMs + hitchCredentialMarginMs
   const result = await call(
     [
       'eval',
@@ -27,11 +29,13 @@ export async function prepareEnvironmentBinding(
       profile.model,
       '--minimum-validity',
       `${validity}ms`,
+      '--timeout',
+      `${settings.preparationTimeoutMs}ms`,
       '--json',
       ...profile.passEnv.flatMap((name) => ['--pass-env', name]),
     ],
     signal,
-    90_000,
+    settings.preparationTimeoutMs,
   )
   const binding = result.binding as Partial<HitchEnvironmentBinding> | undefined
   if (

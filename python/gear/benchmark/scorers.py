@@ -5,10 +5,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from gear.canonical import JSON
+
+from .source import json_value
+
+
+def source_bytes() -> bytes:
+    """Bind both scoring rules and the strict decoder copied into the verifier."""
+    return Path(__file__).read_bytes() + b"\0" + Path(__file__).with_name("source.py").read_bytes()
 
 
 @dataclass(frozen=True)
@@ -38,7 +45,7 @@ def score_output(
         passed = normalized(actual, rule) == normalized(expected, rule)
     elif kind == "json":
         try:
-            parsed = json.loads(actual)
+            parsed = json_value(actual, "output")
         except (ValueError, TypeError):
             return Score("valid", 0.0, "output is not valid JSON")
         if not isinstance(expected, dict):

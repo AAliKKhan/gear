@@ -1,6 +1,10 @@
 import { expect, it } from 'vitest'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { artifactPins, hitchPreparedArtifacts, assertStablePreparedArtifacts } from '../../src/adapters/hitch/artifacts.js'
 import { canonicalDigest } from '../../src/domain/canonical.js'
+import { isPinnedHarnessReference } from '../../src/adapters/hitch/reference.js'
 
 function fixture() {
   const expected = { evalId: 'eval_' + 'a'.repeat(32), harnessRef: 'pi@version:0.84.1', revisionIdentity: canonicalDigest('revision'), provider: 'local-docker', taskIds: ['a', 'b'] }
@@ -23,6 +27,23 @@ it('retains per-task artifact evidence across multiple platforms and ignores ass
   inspection.execution_plan.work_items.reverse()
   expect(hitchPreparedArtifacts(inspection, expected)).toEqual(result)
   expect(result.map(row => [row.task_id, row.artifact.platform])).toEqual([['a', 'linux-arm64'], ['b', 'linux-x64']])
+})
+it.each(['deepseek', 'pi'])('classifies %s Git artifacts by the selector when repository paths contain @version:', harness => {
+  const { inspection, expected } = fixture()
+  const source = pathToFileURL(join(tmpdir(), 'runtime@version:custom')).href
+  expected.harnessRef = `${harness}@git+${source}#${'a'.repeat(40)}`
+  expect(isPinnedHarnessReference(expected.harnessRef)).toBe(true)
+  for (const section of [inspection.plan, inspection.result]) {
+    for (const row of section.prepared_artifacts) {
+      row.harness_id = harness
+      row.source_type = 'git'
+    }
+  }
+  expect(hitchPreparedArtifacts(inspection, expected)).toHaveLength(2)
+  for (const section of [inspection.plan, inspection.result]) {
+    for (const row of section.prepared_artifacts) row.source_type = 'npm'
+  }
+  expect(() => hitchPreparedArtifacts(inspection, expected)).toThrow(expect.objectContaining({ code: 'hitch-artifact-identity' }))
 })
 it.each(['plan', 'result'] as const)('rejects duplicate/missing task assignments in %s', section => {
   const { inspection, expected } = fixture()

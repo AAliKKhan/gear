@@ -42,6 +42,7 @@ export async function configuredProvider(
                   'hitch/sdk',
                   'process/executable',
                   'hitch/dataset',
+                  'python/benchmark-limits',
                   'hitch/control',
                   'hitch/conditions',
                   'hitch/artifacts',
@@ -51,6 +52,7 @@ export async function configuredProvider(
                   'hitch/evidence',
                   'hitch/verifier',
                   'hitch/transport',
+                  'hitch/settings',
                   'hitch/trajectory',
                   'hitch/native-source',
                   `${context.config.target.adapter}/harness`,
@@ -67,10 +69,13 @@ export async function configuredProvider(
                   'benchmark/harbor.py',
                   'benchmark/native.py',
                   'benchmark/payload.py',
+                  'benchmark/limits.py',
+                  'benchmark/limits.json',
                   'benchmark/environment.py',
                   'benchmark/manifest.py',
                   'benchmark/manifest_codec.cjs',
                   'benchmark/scorers.py',
+                  'benchmark/source.py',
                   'benchmark/python_scorer.py',
                   'benchmark/llm_scorer.py',
                   'benchmark/runtime_limits.py',
@@ -85,12 +90,16 @@ export async function configuredProvider(
                 destination,
                 task_ids: taskIds,
               }),
-            compile: (destination, taskIds, baseImage) =>
-              pythonJson(['benchmark', 'harbor', '--output', destination], {
-                benchmark: context.benchmark,
-                task_ids: taskIds,
-                base_image: baseImage,
-              }),
+            compile: (destination, taskIds, baseImage, compileSignal) =>
+              pythonJson(
+                ['benchmark', 'harbor', '--output', destination],
+                {
+                  benchmark: context.benchmark,
+                  task_ids: taskIds,
+                  base_image: baseImage,
+                },
+                compileSignal,
+              ),
           },
           signal,
         )
@@ -108,7 +117,17 @@ export async function configuredProvider(
   if ('kind' in metaProfile && metaProfile.kind === 'hitch')
     throw new GearError('invalid-meta-profile', 'Select an external Meta process profile')
   const meta = await ProcessOperationProvider.connect(
-    processProfile(metaProfile),
+    processProfile(
+      'kind' in metaProfile && metaProfile.kind === 'codex' && context.config.sandbox
+        ? {
+            ...metaProfile,
+            configuration: {
+              ...metaProfile.configuration,
+              linuxIsolation: context.config.sandbox.linux_isolation,
+            },
+          }
+        : metaProfile,
+    ),
     {
       ...shared,
       directory: join(context.stateRoot, 'runs', context.runId, 'providers/codex'),

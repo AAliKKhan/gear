@@ -22,7 +22,7 @@ where = ["."]
 include = ["gear*"]
 
 [tool.setuptools.package-data]
-gear = ["py.typed", "refine/*.json", "benchmark/*.cjs"]
+gear = ["py.typed", "refine/*.json", "benchmark/*.cjs", "benchmark/*.json"]
 
 [tool.ruff]
 target-version = "py310"

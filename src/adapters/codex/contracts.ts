@@ -4,6 +4,16 @@ import { validateAlgorithmWire } from '../../domain/algorithm-schema.js'
 import type { OperationRequest, ProviderCapabilities } from '../../ports/operations.js'
 import type { ArtifactReaderDescriptor } from '../../domain/trajectory.js'
 
+// Proxy values stay in the trusted worker; the sandbox exposes only its own
+// filtered proxy endpoints to Codex. Profiles opt in by variable name.
+export const codexCredentialEnvNames: readonly string[] = ['CODEX_API_KEY', 'OPENAI_API_KEY']
+export const codexPassEnvNames: readonly string[] = [
+  ...codexCredentialEnvNames,
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+]
+
 export interface CodexConfiguration {
   executable: string
   model: string
@@ -11,6 +21,7 @@ export interface CodexConfiguration {
   timeoutMs: number
   authHome?: string
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  linuxIsolation?: 'seccomp' | 'bubblewrap-only'
 }
 export interface CodexContext {
   runId: string
@@ -56,7 +67,15 @@ export function configuration(input: unknown): CodexConfiguration {
     Array.isArray(value) ||
     Object.keys(value).some(
       (key) =>
-        !['executable', 'model', 'allowedDomains', 'timeoutMs', 'authHome', 'reasoningEffort'].includes(key),
+        ![
+          'executable',
+          'model',
+          'allowedDomains',
+          'timeoutMs',
+          'authHome',
+          'reasoningEffort',
+          'linuxIsolation',
+        ].includes(key),
     ) ||
     typeof value.executable !== 'string' ||
     !isAbsolute(value.executable) ||
@@ -71,6 +90,7 @@ export function configuration(input: unknown): CodexConfiguration {
     value.timeoutMs < 100 ||
     value.timeoutMs > 86_400_000 ||
     (value.authHome !== undefined && (typeof value.authHome !== 'string' || !isAbsolute(value.authHome))) ||
+    (value.linuxIsolation !== undefined && !['seccomp', 'bubblewrap-only'].includes(value.linuxIsolation)) ||
     (value.reasoningEffort !== undefined &&
       !['minimal', 'low', 'medium', 'high', 'xhigh'].includes(value.reasoningEffort))
   )

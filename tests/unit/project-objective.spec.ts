@@ -324,6 +324,8 @@ it('runs a weighted GEPA round with the real isolated Python worker even after a
   await initProject(project, { adapter: 'pi', template: 'text' })
   const { load, dump } = await import('js-yaml')
   const config = load(await readFile(join(project, 'gear.yaml'), 'utf8')) as Record<string, unknown>
+  if (process.env.GEAR_TEST_LINUX_ISOLATION)
+    config.sandbox = { linux_isolation: process.env.GEAR_TEST_LINUX_ISOLATION }
   config.metrics = [quality]
   config.budget = { max_candidates: 1, rounds: 1, max_evaluations: 40 }
   config.objective = {

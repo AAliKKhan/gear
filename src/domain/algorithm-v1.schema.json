@@ -421,7 +421,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/Operation"
-          }
+          },
+          "maxItems": 64
         },
         "reason": {
           "type": "string"
@@ -430,7 +431,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ResearchRecord"
-          }
+          },
+          "maxItems": 64
         }
       },
       "required": [

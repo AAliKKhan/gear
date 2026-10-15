@@ -4,8 +4,10 @@ import { isAbsolute, join } from 'node:path'
 import { GearError } from '../domain/errors.js'
 import { canonicalDigest } from '../domain/canonical.js'
 import type { OperationProfile } from '../adapters/process/operation-provider.js'
-import { hitchMaxConcurrent, type HitchProfile } from '../adapters/hitch/provider.js'
-import { configuration, type CodexConfiguration } from '../adapters/codex/contracts.js'
+import type { HitchProfile } from '../adapters/hitch/provider.js'
+import { hitchSettings } from '../adapters/hitch/settings.js'
+import { isPinnedHarnessReference } from '../adapters/hitch/reference.js'
+import { configuration, codexPassEnvNames, type CodexConfiguration } from '../adapters/codex/contracts.js'
 import { publishFile } from '../adapters/storage/atomic.js'
 import { withFileLock } from '../adapters/storage/file-lock.js'
 import { packageRoot } from './python.js'
@@ -41,6 +43,8 @@ export function validateProfile(input: unknown): Profile {
           'passEnv',
           'timeoutMs',
           'maxConcurrent',
+          'preparationTimeoutMs',
+          'setupTimeoutMs',
         ]
       : kind === 'codex'
         ? ['kind', 'configuration', 'passEnv']
@@ -54,10 +58,10 @@ export function validateProfile(input: unknown): Profile {
     throw new GearError('invalid-profile', 'Invalid profile fields or environment variable names')
   if (kind === 'codex') {
     configuration(value.configuration)
-    if (value.passEnv.some((name) => !['CODEX_API_KEY', 'OPENAI_API_KEY'].includes(name)))
+    if (value.passEnv.some((name) => !codexPassEnvNames.includes(name)))
       throw new GearError(
         'invalid-profile',
-        'Codex credentials must use CODEX_API_KEY, OPENAI_API_KEY or authHome',
+        'Codex passEnv accepts CODEX_API_KEY, OPENAI_API_KEY, HTTP_PROXY, HTTPS_PROXY and NO_PROXY; local login uses authHome',
       )
   } else {
     if (
@@ -67,18 +71,18 @@ export function validateProfile(input: unknown): Profile {
     )
       throw new GearError('invalid-profile', 'timeoutMs must be between 100 and 86400000')
     if (kind === 'hitch') {
-      hitchMaxConcurrent(value as unknown as HitchProfile)
+      hitchSettings(value as unknown as HitchProfile)
       if (
         ['executable', 'root', 'harnessRef', 'model', 'baseImage'].some(
           (key) => typeof value[key] !== 'string' || !(value[key] as string).trim(),
         ) ||
         !isAbsolute(value.root as string) ||
-        !/^(?:deepseek|pi)@(?:version:\d[^\s]*|commit:[a-f0-9]{40,64})$/u.test(value.harnessRef as string) ||
+        !isPinnedHarnessReference(value.harnessRef as string) ||
         !/^[A-Za-z0-9._:/-]+@sha256:[a-f0-9]{64}$/u.test(value.baseImage as string)
       )
         throw new GearError(
           'invalid-profile',
-          'Hitch requires an absolute root, pinned harness revision and OCI image digest',
+          'Hitch requires an absolute root, pinned harness revision (exact version or 40-character SHA-1 commit) and OCI image digest',
         )
     } else if (
       !Array.isArray(value.command) ||

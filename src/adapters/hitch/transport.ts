@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { GearError } from '../../domain/errors.js'
+import { hitchControlTimeoutMs } from './settings.js'
 
 /** One bounded CLI call. A timeout is an unknown remote outcome, never a failed trial. */
 export function hitchJson(
@@ -7,7 +8,7 @@ export function hitchJson(
   root: string,
   args: string[],
   signal: AbortSignal,
-  timeoutMs = 30_000,
+  timeoutMs = hitchControlTimeoutMs,
   maxBytes = 32 * 1024 * 1024,
 ): Promise<Record<string, unknown>> {
   signal.throwIfAborted()

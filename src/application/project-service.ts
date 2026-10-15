@@ -499,6 +499,7 @@ export class ProjectApplication {
         sourceRoot: source,
         scratch,
         implementationIdentity: identity,
+        ...(context.config.sandbox ? { linuxIsolation: context.config.sandbox.linux_isolation } : {}),
         protectedPaths: [
           join(context.stateRoot, 'runs', context.runId, 'benchmark.json'),
           join(this.root, 'gear.yaml'),

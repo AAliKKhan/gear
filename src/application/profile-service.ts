@@ -11,6 +11,11 @@ import { withFileLock } from '../adapters/storage/file-lock.js'
 import { resolveProject } from './project-config.js'
 import { assertProfileRole, profile, saveProfile, type ProfileRole } from './profile-store.js'
 import { runtimeMatrix } from './runtime-matrix.js'
+import {
+  defaultHitchConcurrency,
+  defaultPreparationTimeoutMs,
+  defaultSetupTimeoutMs,
+} from '../adapters/hitch/settings.js'
 
 export { findExecutable } from '../adapters/process/executable.js'
 export async function pinImage(image: string): Promise<string> {
@@ -48,6 +53,8 @@ export interface CreateProfileOptions {
   passEnv?: string[]
   timeoutMs?: number
   maxConcurrent?: number
+  preparationTimeoutMs?: number
+  setupTimeoutMs?: number
   authHome?: string
   allowedDomains?: string[]
 }
@@ -62,7 +69,16 @@ export async function createProfile(name: string, options: CreateProfileOptions)
   const common = ['kind', 'model', 'executable', 'passEnv', 'timeoutMs']
   const keys =
     options.kind === 'hitch'
-      ? [...common, 'adapter', 'root', 'harnessRef', 'baseImage', 'maxConcurrent']
+      ? [
+          ...common,
+          'adapter',
+          'root',
+          'harnessRef',
+          'baseImage',
+          'maxConcurrent',
+          'preparationTimeoutMs',
+          'setupTimeoutMs',
+        ]
       : [...common, 'authHome', 'allowedDomains']
   if (Object.keys(options).some((key) => !keys.includes(key)))
     throw new GearError('invalid-profile-options', 'Unknown options for this profile kind')
@@ -78,7 +94,9 @@ export async function createProfile(name: string, options: CreateProfileOptions)
       baseImage: await pinImage(options.baseImage ?? runtimeMatrix.baseImage),
       passEnv: options.passEnv ?? [],
       timeoutMs: options.timeoutMs ?? 1_800_000,
-      ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
+      maxConcurrent: options.maxConcurrent ?? defaultHitchConcurrency,
+      preparationTimeoutMs: options.preparationTimeoutMs ?? defaultPreparationTimeoutMs,
+      setupTimeoutMs: options.setupTimeoutMs ?? defaultSetupTimeoutMs,
     } as const
     assertProfileRole(value, 'target', options.adapter)
     return saveProfile(name, value)

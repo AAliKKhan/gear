@@ -12,6 +12,7 @@ from gear.canonical import digest
 
 from .runtime_limits import source_bytes, template_timeouts
 from .scorers import fixtures, score_output
+from .scorers import source_bytes as scorer_source_bytes
 from .source import BenchmarkError, apply_splits, json_value, read_rows
 
 
@@ -263,7 +264,7 @@ def compile_rows(root: Path, config: dict, source: Path, rows: list, split_ident
         ),
         **({"split_digest": split_identity} if split_identity is not None else {}),
         **({"importer": config["importer"]} if "importer" in config else {}),
-        "scorer_source_digest": bytes_digest(Path(__file__).with_name("scorers.py").read_bytes()),
+        "scorer_source_digest": bytes_digest(scorer_source_bytes()),
         **(
             {
                 "python_scorer_source_digest": bytes_digest(

@@ -68,12 +68,22 @@ try {
     note('Installed carriers through real DSH/Pi headless CLIs and separate container scoring')
     run(process.execPath, [join(source, 'scripts/check-target-headless.mjs')], { cwd: root, env: { ...env, GEAR_TEST_PACKAGE_ROOT: join(install, 'node_modules/rsi-gear'), GEAR_TEST_HEADLESS_OUTPUT: join(root, 'headless') } })
   }
-  const gear = (project, args) => JSON.parse(run(process.execPath, [cli, '--project', project, '--json', ...args], { cwd: root, env }))
+  const gear = (project, args) => {
+    const result = JSON.parse(run(process.execPath, [cli, '--project', project, '--json', ...args], { cwd: root, env }))
+    if (args[0] === 'init' && process.env.GEAR_TEST_LINUX_ISOLATION) {
+      // Exercise the public compatibility setting on hosts that restrict nested user namespaces.
+      const config = join(resolve(project, args[1]), 'gear.yaml')
+      writeFileSync(config, readFileSync(config, 'utf8') + '\nsandbox: {linux_isolation: ' + JSON.stringify(process.env.GEAR_TEST_LINUX_ISOLATION) + '}\n')
+    }
+    return result
+  }
   note('Installed setup, profile creation and local doctor')
   const setup = gear(root, ['setup', '--python', python])
   assert.equal(setup.python.status, 'installed')
   const managedEnv = { ...env, GEAR_PYTHON: '', GEAR_TRAINING_TEST_PYTHON: '' }
-  const prerequisites = JSON.parse(run(process.execPath, [cli, '--project', root, '--json', 'doctor'], { cwd: root, env: managedEnv }))
+  const doctorProject = process.env.GEAR_TEST_LINUX_ISOLATION ? join(root, 'doctor-project') : root
+  if (doctorProject !== root) gear(root, ['init', doctorProject])
+  const prerequisites = JSON.parse(run(process.execPath, [cli, '--project', doctorProject, '--json', 'doctor'], { cwd: root, env: managedEnv }))
   assert.equal(prerequisites.checks.find(check => check.component === 'python').status, 'passed')
   assert.equal(prerequisites.checks.find(check => check.component === 'python').data.executable, setup.python.executable)
   assert.equal(prerequisites.checks.find(check => check.component === 'isolation').status, 'passed', JSON.stringify(prerequisites))

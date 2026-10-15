@@ -3,6 +3,7 @@ import type { HarnessAdapter } from '../../ports/harness.js'
 import type { HitchProfile } from './provider.js'
 import { hitchJson } from './transport.js'
 import { observeEvaluationEnvironment } from './observation.js'
+import { isPinnedHarnessReference } from './reference.js'
 
 export async function inspectHitchConnection(
   profile: HitchProfile,
@@ -17,12 +18,12 @@ export async function inspectHitchConnection(
   const expected = adapter.describe().adapterRef.id === 'dsh' ? 'deepseek' : 'pi'
   if (
     !profile.harnessRef.startsWith(`${expected}@`) ||
-    !/@(?:version:\d[^\s]*|commit:[a-f0-9]{40,64})$/u.test(profile.harnessRef) ||
+    !isPinnedHarnessReference(profile.harnessRef) ||
     !/^[A-Za-z0-9._:/-]+@sha256:[a-f0-9]{64}$/u.test(profile.baseImage)
   )
     throw new GearError(
       'unlocked-target-runtime',
-      'Hitch profiles require the matching exact harness version/commit and an OCI image digest',
+      'Hitch profiles require the matching exact harness version or 40-character SHA-1 commit and an OCI image digest',
     )
   const runtime = await hitchJson(
     profile.executable,
@@ -37,11 +38,12 @@ export async function inspectHitchConnection(
     capabilities.controller_runtime_observation !== '2' ||
     capabilities.local_execution_observation !== '2' ||
     capabilities.evaluation_environment_binding !== '3' ||
+    capabilities.evaluation_preparation !== '1' ||
     capabilities.evaluation_artifact_pins !== '1'
   )
     throw new GearError(
       'hitch-capability-missing',
-      'Hitch must support ordered evaluation control v2, execution observations v2, environment bindings v3 and artifact pins v1',
+      'Hitch must support ordered evaluation control v2, execution observations v2, environment bindings v3, configurable preparation v1 and artifact pins v1',
     )
   const executionEnvironment = await observeEvaluationEnvironment(
     (args, signal, timeout) => hitchJson(profile.executable, profile.root, args, signal, timeout),

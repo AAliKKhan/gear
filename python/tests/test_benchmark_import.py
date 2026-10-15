@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -202,17 +203,16 @@ class NativeHarborImportTests(unittest.TestCase):
         from gear.benchmark.payload import Payload
         from gear.canonical import digest
 
-        with (
-            patch("gear.benchmark.payload.MAX_UNIQUE_BYTES", 6),
-            patch("gear.benchmark.payload.MAX_MATERIALIZED_BYTES", 9),
-        ):
+        with patch.dict(os.environ, {"GEAR_BENCHMARK_LIMITS_JSON": json.dumps({
+            "maxUniqueBytes": 6, "maxMaterializedBytes": 9,
+        })}):
             payload = Payload()
             payload.add("a", b"12345")
             with self.assertRaisesRegex(BenchmarkError, "unique payload"):
                 payload.add("b", b"67")
             payload = Payload()
             payload.add("a", b"12345")
-            with self.assertRaisesRegex(BenchmarkError, "4 GiB"):
+            with self.assertRaisesRegex(BenchmarkError, "maxMaterializedBytes"):
                 payload.add("b", b"12345")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

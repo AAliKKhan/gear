@@ -9,6 +9,7 @@ import { withFileLock } from '../adapters/storage/file-lock.js'
 import { resolveProject } from './project-config.js'
 import { pinImage } from './profile-service.js'
 import { pythonJson } from './python.js'
+import { benchmarkLimits } from '../adapters/python/benchmark-limits.js'
 
 interface ImportFile {
   path: string
@@ -63,6 +64,7 @@ function directoryPaths(files: ImportFile[], directories: string[]): Set<string>
   return result
 }
 function validate(prepared: PreparedImport): void {
+  const limits = benchmarkLimits()
   const { digest, ...body } = prepared
   if (
     canonicalDigest(body) !== digest ||
@@ -74,8 +76,8 @@ function validate(prepared: PreparedImport): void {
     !['holdout', 'research'].includes(prepared.validation_mode) ||
     !Array.isArray(prepared.files) ||
     !Array.isArray(prepared.directories) ||
-    prepared.files.length > 100_000 ||
-    prepared.directories.length > 100_000 ||
+    prepared.files.length > limits.maxFiles ||
+    prepared.directories.length > limits.maxDirectories ||
     prepared.directories.some((path) => !containedPath(path) || path === 'benchmark.yaml') ||
     new Set(prepared.directories).size !== prepared.directories.length ||
     new Set(prepared.files.map((file) => file.path)).size !== prepared.files.length
@@ -85,14 +87,14 @@ function validate(prepared: PreparedImport): void {
   let uniqueBytes = 0,
     materializedBytes = 0
   for (const [digest, encoded] of Object.entries(prepared.blobs)) {
-    if (typeof encoded !== 'string' || encoded.length > Math.ceil((64 * 1024 * 1024) / 3) * 4)
+    if (typeof encoded !== 'string' || encoded.length > Math.ceil(limits.maxUniqueBytes / 3) * 4)
       throw new GearError('import-plan-invalid', 'Invalid import content blob')
     const content = Buffer.from(encoded, 'base64')
     uniqueBytes += content.length
     if (
       content.toString('base64') !== encoded ||
       `sha256:${createHash('sha256').update(content).digest('hex')}` !== digest ||
-      uniqueBytes > 64 * 1024 * 1024
+      uniqueBytes > limits.maxUniqueBytes
     )
       throw new GearError('import-plan-invalid', 'Import blob digest or unique size does not match')
     sizes.set(digest, content.length)
@@ -113,12 +115,17 @@ function validate(prepared: PreparedImport): void {
       )
     used.add(file.digest)
     materializedBytes += file.size
-    if (materializedBytes > 4 * 1024 * 1024 * 1024)
-      throw new GearError('import-plan-invalid', 'Materialized import exceeds 4 GiB')
+    if (materializedBytes > limits.maxMaterializedBytes)
+      throw new GearError(
+        'import-plan-invalid',
+        'Materialized import exceeds maxMaterializedBytes in GEAR_BENCHMARK_LIMITS_JSON',
+      )
   }
   if (used.size !== sizes.size)
     throw new GearError('import-plan-invalid', 'Import contains unreferenced content blobs')
   const directories = directoryPaths(prepared.files, prepared.directories)
+  if (directories.size > limits.maxDirectories)
+    throw new GearError('import-plan-invalid', 'Import exceeds maxDirectories in GEAR_BENCHMARK_LIMITS_JSON')
   if (directories.has('benchmark.yaml') || prepared.files.some((file) => directories.has(file.path)))
     throw new GearError('import-plan-invalid', 'Imported files and directories must not overlap')
 }

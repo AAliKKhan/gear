@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from pathlib import Path
 
 
@@ -25,11 +26,14 @@ def json_value(text: str, location: str):
             result[key] = value
         return result
 
-    def invalid(value):
-        raise ValueError("non-finite JSON number: " + value)
+    def number(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite JSON number: " + value)
+        return parsed
 
     try:
-        return json.loads(text, object_pairs_hook=pairs, parse_constant=invalid)
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=number, parse_float=number)
     except ValueError as error:
         raise BenchmarkError(str(error), location) from error
 

@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { canonicalDigest } from '../../domain/canonical.js'
 import type { CodexConfiguration } from './contracts.js'
 import { builtinPolicyImplementationDigest } from '../python/builtin-policy.js'
+import { resolveCodexExecutable } from './executable.js'
 
 export async function fileDigest(path: string): Promise<string> {
   const hash = createHash('sha256')
@@ -22,7 +23,7 @@ export async function describeCodex(config: CodexConfiguration): Promise<{
   codeModeHost?: string
   caCertificates?: string
 }> {
-  const executable = await realpath(config.executable)
+  const executable = await resolveCodexExecutable(config.executable)
   const companion = join(dirname(executable), 'codex-code-mode-host')
   const codeModeHost = await access(companion, constants.X_OK)
     .then(() => realpath(companion))
@@ -47,6 +48,7 @@ export async function describeCodex(config: CodexConfiguration): Promise<{
       'contracts',
       'auth',
       'identity',
+      'executable',
       'runner',
       'journal',
       'sandbox',
@@ -61,6 +63,7 @@ export async function describeCodex(config: CodexConfiguration): Promise<{
       '../hitch/trajectory',
       '../hitch/native-source',
       '../hitch/transport',
+      '../hitch/settings',
       '../python/packaged-policy',
       '../python/builtin-policy',
       '../storage/experience',

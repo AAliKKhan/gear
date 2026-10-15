@@ -10,6 +10,7 @@ import {
   createAirGappedSandboxConfig,
   sandboxSystemReadPaths,
   type AirGappedSandboxLease,
+  type LinuxSandboxIsolation,
 } from '../../sandbox.js'
 import { canonicalDigest } from '../../domain/canonical.js'
 import { GearError } from '../../domain/errors.js'
@@ -35,6 +36,7 @@ export interface PythonWorkerOptions {
   implementationIdentity: string
   timeoutMs?: number
   protectedPaths?: string[]
+  linuxIsolation?: LinuxSandboxIsolation
 }
 
 /** No unsandboxed production fallback. The pure toy kit runs directly in Python. */
@@ -51,7 +53,7 @@ export class PythonAlgorithmWorker {
 
   async start(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted()
-    this.lease = await acquireAirGappedSandbox(undefined, 'Python algorithm worker')
+    this.lease = await acquireAirGappedSandbox(this.options.linuxIsolation, 'Python algorithm worker')
     try {
       const python = await inspectPython(this.options.python)
       const sourceRoot = await realpath(this.options.sourceRoot),
@@ -81,6 +83,7 @@ export class PythonAlgorithmWorker {
         }
       }
       const config = await createAirGappedSandboxConfig({
+        linuxIsolation: this.options.linuxIsolation,
         allowRead: [...runtimePaths, sourceRoot, scratch],
         allowWrite: [scratch],
       })

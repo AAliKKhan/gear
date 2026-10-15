@@ -17,8 +17,10 @@ from .environment import read_environment
 from .environment import read_text as native_text
 from .manifest import implementation_digest as manifest_digest
 from .manifest import read_metadata
-from .payload import MAX_ENTRIES, MAX_UNIQUE_BYTES, Payload, used_blobs
+from .payload import Payload, used_blobs
+from .payload import source_bytes as payload_source_bytes
 from .runtime_limits import native_timeouts, source_bytes
+from .scorers import source_bytes as scorer_source_bytes
 from .source import BenchmarkError, apply_splits, json_value
 
 PINNED = re.compile(r"[A-Za-z0-9._:/-]+@sha256:[a-f0-9]{64}\Z")
@@ -101,16 +103,20 @@ def native_tasks(source: Path) -> tuple[list[dict], Payload, dict]:
                     )
                 if path.is_dir():
                     directory_count += 1
-                    if directory_count > MAX_ENTRIES:
+                    if directory_count > payload.limits["maxDirectories"]:
                         raise BenchmarkError(
-                            "native payload exceeds 100000 directories", str(source)
+                            "native payload exceeds maxDirectories in GEAR_BENCHMARK_LIMITS_JSON",
+                            str(source),
                         )
                     directories.append(relative)
                     visit(path)
                 else:
                     path = contained_file(root, relative)
-                    if path.stat().st_size > MAX_UNIQUE_BYTES:
-                        raise BenchmarkError("unique payload content exceeds 64 MiB", relative)
+                    if path.stat().st_size > payload.limits["maxUniqueBytes"]:
+                        raise BenchmarkError(
+                            "unique payload content exceeds maxUniqueBytes in GEAR_BENCHMARK_LIMITS_JSON",
+                            relative,
+                        )
                     files.append(
                         payload.add(relative, path.read_bytes(), bool(path.stat().st_mode & 0o111))
                     )
@@ -299,10 +305,10 @@ def compile_native(root: Path, config: dict) -> dict:
         "environment_source_digest": bytes_digest(
             Path(__file__).with_name("environment.py").read_bytes()
         ),
-        "payload_source_digest": bytes_digest(Path(__file__).with_name("payload.py").read_bytes()),
+        "payload_source_digest": bytes_digest(payload_source_bytes()),
         "execution_timeouts": {entry["task"]["id"]: entry["timeouts"] for entry in entries},
         "runtime_limits_source_digest": bytes_digest(source_bytes()),
-        "scorer_source_digest": bytes_digest(Path(__file__).with_name("scorers.py").read_bytes()),
+        "scorer_source_digest": bytes_digest(scorer_source_bytes()),
         "checks": {"static": "passed", "verifier_fixtures": "not_run", "environment": "not_run"},
         **({"importer": config["importer"]} if "importer" in config else {}),
     }

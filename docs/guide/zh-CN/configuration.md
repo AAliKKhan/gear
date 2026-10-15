@@ -128,13 +128,17 @@ protection:
 
 process 必须报告真实实现身份和能力，并持久实现 submit/inspect/cancel。仅把可执行文件路径填进去并不构成可用 provider。`passEnv` 是变量名列表，不在项目锁文件中保存变量值。
 
-Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、`harnessRef`、`model`、`baseImage`、`passEnv`、`timeoutMs`，以及可选的 `maxConcurrent`。`maxConcurrent` 是正整数，默认 `1`；设为 `4`（或创建时使用 `gear profile create … --max-concurrent 4`）表示每次评估最多请求四个 trial 并发。实际并发还受 Hitch 的 CPU、内存和容器容量限制。并发属于冻结的 provider 身份和执行条件，修改后须新建运行，不能复用旧身份下的评测证据。
+Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、`harnessRef`、`model`、`baseImage`、`passEnv`、`timeoutMs`，以及可选的 `maxConcurrent`、`setupTimeoutMs`、`preparationTimeoutMs`。新建 Target profile 默认使用 DSH `0.1.5-rc.3` 或 Pi `0.84.1`；既有 profile 保留其精确版本。当前 DSH 版本由上游固定 HMR 依赖，无需 Gear 专用覆盖。DSH 的 harnessRef 必须是确切 `deepseek@version:...` 或 commit，Pi 使用 `pi@version:...` 或 commit；baseImage 固定 OCI sha256。运行前核对解析后的 harness 源码身份、能力和 daemon 状态，并用 fresh worker observation v2 绑定 Hitch controller、Harbor 可执行文件和 Docker 引擎的观测身份。评估明确提交到 `local-docker`；新提交前和保存回执前重新观测，变化时拒绝继续接纳。回包还必须匹配 controller runtime 和执行 provider。接纳回包及补取原材料时，还核对实际请求中的模型、载体参数、凭据变量名范围、重复/并发/重试次数和超时；不一致的结果不会接纳。计划、结果及 work item 的 prepared artifact、入口/目录摘要、任务映射和平台/Node 合同也必须一致；同一评估的重复试验不能使用不同依赖。原材料补取保留原始 artifact 证据。
 
-新建 Target profile 默认使用 DSH `0.1.5-rc.3` 或 Pi `0.84.1`；既有 profile 保留其精确版本。当前 DSH 版本由上游固定 HMR 依赖，无需 Gear 专用覆盖。DSH 的 harnessRef 必须是确切 `deepseek@version:...` 或 commit，Pi 使用 `pi@version:...` 或 commit；baseImage 固定 OCI sha256。运行前核对解析后的 harness 源码身份、能力和 daemon 状态，并用 fresh worker observation v2 绑定 Hitch controller、Harbor 可执行文件和 Docker 引擎的观测身份。评估明确提交到 `local-docker`；新提交前和保存回执前重新观测，变化时拒绝继续接纳。回包还必须匹配 controller runtime 和执行 provider。接纳回包及补取原材料时，还核对实际请求中的模型、载体参数、凭据变量名范围、重复/并发/重试次数和超时；不一致的结果不会接纳。计划、结果及 work item 的 prepared artifact、入口/目录摘要、任务映射和平台/Node 合同也必须一致；同一评估的重复试验不能使用不同依赖。原材料补取保留原始 artifact 证据。
+自定义运行时仓库可使用 `deepseek@git+file:///absolute/repository#<full-commit>` 或对应的 `pi@` 引用。Git 必须指定完整的小写 40 位 SHA-1 提交号；profile 校验会拒绝分支、短哈希及 64 位 SHA-256 提交号。Hitch 当前的 Git 缓存和制品构建器仅支持 SHA-1 仓库。file URL 必须规范化，空格需百分号编码。Hitch 导出并构建固定提交及其锁定依赖，因此可加载自定义 provider 插件，无需修改 Gear 或依赖可变的已安装运行时。
 
-运行计划连接 provider 时，Gear 通过该 Hitch 安装的公开 SDK 编译任务平台声明并准备对应的 Harbor artifact。准备前后核对 SDK 与 daemon 观测到的 controller 和 Docker/Harbor 环境；实际 artifact、入口/目录摘要与逐任务平台绑定进入 provider/evaluation identity，供跨 run baseline 比较。新物理提交前再次校验缓存文件，回执必须匹配事先冻结的绑定。首次准备可能下载包和运行 Docker 构建器，单次准备/复核限制为 30 分钟；不创建评估作业或模型请求。`doctor` 保持只读，不执行 artifact 构建。
+运行计划连接 provider 时，Gear 通过该 Hitch 安装的公开 SDK 编译任务平台声明并准备对应的 Harbor artifact。准备前后核对 SDK 与 daemon 观测到的 controller 和 Docker/Harbor 环境；实际 artifact、入口/目录摘要与逐任务平台绑定进入 provider/evaluation identity，供跨 run baseline 比较。新物理提交前再次校验缓存文件，回执必须匹配事先冻结的绑定。首次准备可能下载包和运行 Docker 构建器，单次准备/复核由 profile 的 `preparationTimeoutMs` 控制，默认 30 分钟；不创建评估作业或模型请求。`doctor` 保持只读，不执行 artifact 构建。
 
-还要求 Hitch 提供 `evaluation_environment_binding: "3"` 能力；现有 0.2.16 发布版本本身不保证支持。Gear 调用 daemon 的 `eval bind`，将实际驻留环境、模型、变量名、冻结 helper 输出、Harbor Python 内容及受支持的环境引用文件的私有 HMAC 绑定加入运行身份；新准入与 Harbor 启动前由 Hitch 复核，回执必须携带同一绑定。Python 版本不变但依赖文件变化也会使旧绑定失效；正常生成的字节码缓存不会改变身份。标准证书和凭据配置文件自动检查；自定义主机文件变量在 daemon 环境中通过 `HITCH_EVALUATION_FILE_ENV_JSON='["MY_PROVIDER_CONFIG"]'` 声明，使用绝对文件路径。凭据不进入 Gear 项目锁或公开回执，失效时需要准备新运行。当前配套实现与文件范围见[环境文件绑定说明](../../testing/hitch-environment-files.zh-CN.md)。
+还要求 Hitch 提供 `evaluation_environment_binding: "3"` 与 `evaluation_preparation: "1"` 能力；现有 0.2.16 发布版本本身不保证支持。Gear 调用 daemon 的 `eval bind`，将实际驻留环境、模型、变量名、冻结 helper 输出、Harbor Python 内容及受支持的环境引用文件的私有 HMAC 绑定加入运行身份；新准入与 Harbor 启动前由 Hitch 复核，回执必须携带同一绑定。Python 版本不变但依赖文件变化也会使旧绑定失效；正常生成的字节码缓存不会改变身份。标准证书和凭据配置文件自动检查；自定义主机文件变量在 daemon 环境中通过 `HITCH_EVALUATION_FILE_ENV_JSON='["MY_PROVIDER_CONFIG"]'` 声明，使用绝对文件路径。凭据不进入 Gear 项目锁或公开回执，失效时需要准备新运行。当前配套实现与文件范围见[环境文件绑定说明](../../testing/hitch-environment-files.zh-CN.md)。
+
+新建 Hitch profile 显式保存 `maxConcurrent: 4`，与 Hitch 默认值一致；没有该字段的既有 profile 保留并发 1。创建时用 `--max-concurrent N` 请求更高的任务并发，实际接纳仍受 daemon 资源容量约束。接纳结果前会核对实际执行并发与冻结配置一致。并发属于冻结的 provider 身份，修改后须新建运行，不能复用旧身份下的评测证据。
+
+`--preparation-timeout-ms` 同时控制 artifact 准备/复核、环境绑定及提交准入（其中也会校验 Python 运行时）。`--setup-timeout-ms` 控制逐任务环境准备预算，默认 1800000 毫秒；它与任务 `timeoutMs` 之和须符合 Hitch 的 24 小时限制，完整 24 小时任务应显式设置 setup 为 0。其余时间配置使用正整数毫秒，准备期限须在 Node 定时器范围内。等待整组评测时为每个任务保留 setup 与执行预算，兼容实际 daemon 容量低于请求并发的情况。取消与响应丢失后的恢复保留原评估身份。
 
 Gear 同时要求 `evaluation_artifact_pins: "1"`：每次提交携带当前任务平台的产物 ID、目录摘要和入口摘要。Hitch 在产物准备后和 Harbor 执行前强制核对，恢复与重试保留原 pins；回执仍须匹配。协议和验证范围见[执行前产物约束](../../testing/hitch-artifact-pins.zh-CN.md)。
 
@@ -149,6 +153,7 @@ Gear 同时要求 `evaluation_artifact_pins: "1"`：每次提交携带当前任�
 
 Meta 与 Target 分别认证。Codex Meta 使用[随包 operation runner](../../codex-meta-runner.zh-CN.md)，
 原生 `kind: "codex"` 配置由 Gear 解析到当前安装包，避免手写 runner 路径。
+主机需要 HTTP 上游代理时，在 Codex profile 的 `passEnv` 中显式加入 `HTTP_PROXY`、`HTTPS_PROXY` 和可选的 `NO_PROXY`（CLI：`--pass-env HTTP_PROXY,HTTPS_PROXY,NO_PROXY`）。配置只保存变量名；可信 worker 通过这些值连接上游，Codex 只收到沙箱代理端点，不会收到上游代理凭据。`allowedDomains` 仍限制目标域名，`NO_PROXY` 也不能绕过该限制。默认不继承代理变量；使用 API key 时，须在同一列表中保留相应 key 的变量名。
 `doctor` 检查本地登录文件或环境变量存在性；不验证远端模型授权、不执行 benchmark。
 自定义 process 的认证返回 `provider_managed`，需按其文档检查。
 Python `Project` 提供 `profiles()`、`create_profile()`、`use_profile()`、`doctor()` 及 async 对应入口。
@@ -177,3 +182,9 @@ assertion_protection:
 `must_pass` 要求每次重复的候选断言都通过，`excluded` 也不能满足该规则。`no_new_violation` 禁止基线未失败的断言在候选中变为 failed；基线已经 failed 时，该规则本身不强制修复。两条规则都需要基线和候选的独立证据，missing/invalid/unsupported 均使保护不完整。每个 task/assertion 只能声明一条规则，held-out 规则仅供最终 gate 使用。
 
 报告的 `scores.*.<partition>.assertions` 保留每个任务、重复槽位的全部已声明断言，包括未设置保护的断言；`assertion_protection` 给出逐槽位保护判定。独立断言可通过原材料只读投影补齐；已有 passed/failed/excluded 结果不可重写，也不会因断言失败而重跑有效执行。
+
+## 准备预算与 Linux 隔离
+
+通过 Gear 进程的 `GEAR_BENCHMARK_LIMITS_JSON` 覆盖已知准备预算。Python 导入/编译、TypeScript 计划校验和冻结数据集摘要共用默认值：`maxFiles: 200000`、`maxDirectories: 100000`、`maxUniqueBytes: 67108864`、`maxMaterializedBytes: 4294967296`、`authorTimeoutMs: 300000`、`maxOutputBytes: 134217728`。例如 `GEAR_BENCHMARK_LIMITS_JSON='{"maxFiles":300000,"authorTimeoutMs":600000}'` 适用于任意受支持的数据集。值必须为正安全整数，超时须在 Node 定时器范围内。提高预算不会跳过内容或路径校验。超时/取消会等待作者工具子进程退出，POSIX 下同时终止其进程组。
+
+Linux 默认使用 `seccomp`。若主机 AppArmor 禁止 helper 创建嵌套 namespace，可在 `gear.yaml` 显式设置 `sandbox: {linux_isolation: bubblewrap-only}`；该选项作用于 Python 算法和原生 Codex Meta，并随运行配置冻结。兼容模式保留文件系统、PID 与网络 namespace 隔离，但不通过 seccomp 过滤 Unix socket 创建；宿主私有控制 socket 必须位于读取允许范围之外。`gear doctor` 探测所选模式，不会自动降级，也没有关闭隔离的选项。参见[平台隔离验证](../../plugin-installation-and-usage.md)。

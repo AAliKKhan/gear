@@ -51,6 +51,12 @@ outputs = {
     'python/gear/refine/wire_types.py': ('\n'.join(py)+'\n').encode(),
     'src/domain/algorithm-v1.schema.json': source.read_bytes(),
     'python/gear/refine/algorithm-v1.schema.json': source.read_bytes(),
+    'python/gear/algorithms/limits.py': (
+        '"""Generated decision bounds from contracts/algorithm-v1.schema.json."""\n\n'
+        + 'MAX_DECISION_OPERATIONS = '
+        + str(schema['$defs']['Decision']['properties']['operations']['maxItems'])
+        + '\n'
+    ).encode(),
 }
 for name, content in outputs.items():
     target = root / name

@@ -6,6 +6,10 @@ import type { HitchProfile, HitchProviderContext } from './provider.js'
 import type { inspectHitchConnection } from './connection.js'
 import { openHitchSdk, sdkObject, type HitchEnvironment } from './sdk.js'
 import { parsePreparedArtifacts, type TaskArtifact } from './artifacts.js'
+import { hitchSettings } from './settings.js'
+
+// Bound simultaneous host Python inspectors independently of task execution.
+const taskInspectionBatchSize = 8
 
 type Connection = Awaited<ReturnType<typeof inspectHitchConnection>>
 export interface HitchRuntimeAccess {
@@ -22,9 +26,13 @@ export interface HitchRuntimeAccess {
     signal: AbortSignal,
   ): Promise<void>
 }
-async function bounded<T>(signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function bounded<T>(
+  signal: AbortSignal,
+  timeoutMs: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   const deadline = new AbortController(),
-    timer = setTimeout(() => deadline.abort(), 30 * 60_000)
+    timer = setTimeout(() => deadline.abort(), timeoutMs)
   const combined = AbortSignal.any([signal, deadline.signal])
   try {
     return await work(combined)
@@ -48,7 +56,7 @@ export class HitchPreparedRuntime implements HitchRuntimeAccess {
     connection: Connection,
     signal: AbortSignal,
   ): Promise<TaskArtifact[]> {
-    return bounded(signal, async (signal) => {
+    return bounded(signal, hitchSettings(profile).preparationTimeoutMs, async (signal) => {
       if (!context.taskIds.length || new Set(context.taskIds).size !== context.taskIds.length)
         throw new GearError(
           'hitch-preparation-tasks',
@@ -81,14 +89,38 @@ export class HitchPreparedRuntime implements HitchRuntimeAccess {
       const temporary = await mkdtemp(join(tmpdir(), 'gear-hitch-preparation-')),
         dataset = join(temporary, 'dataset')
       try {
-        await context.compile(dataset, context.taskIds, profile.baseImage)
+        let localTransport: unknown
+        if (profile.harnessRef.includes('@git+')) {
+          const reference = sdkObject(
+              await sdk.call('revisions', 'parseHarnessReference', profile.harnessRef),
+            ),
+            selector = sdkObject(reference.selector),
+            source = sdkObject(selector.source)
+          if (
+            selector.type !== 'commit' ||
+            source.explicit !== true ||
+            typeof source.local_path !== 'string' ||
+            sdkObject(resolution.revision).commit !== selector.value
+          )
+            throw new GearError('hitch-revision-drift', 'Local Git source must resolve to its exact commit')
+          // The Docker builder cannot access the host repository path. Export
+          // the exact commit through Hitch's verified transport before building.
+          localTransport = await sdk.call('backends', 'buildLocalGitTransport', {
+            evalDirectory: temporary,
+            resolvedRevision: resolution,
+            sourceDirectory: source.local_path,
+            env: process.env,
+            signal,
+          })
+        }
+        await context.compile(dataset, context.taskIds, profile.baseImage, signal)
         signal.throwIfAborted()
         const groups = new Map<string, string[]>()
-        for (let offset = 0; offset < context.taskIds.length; offset += 8) {
+        for (let offset = 0; offset < context.taskIds.length; offset += taskInspectionBatchSize) {
           const tasks = await sdk.call('evals', 'resolveLocalTaskPlanningInputs', {
             root: profile.root,
             dataset,
-            taskIds: context.taskIds.slice(offset, offset + 8),
+            taskIds: context.taskIds.slice(offset, offset + taskInspectionBatchSize),
             defaultResources: sdk.value('evals', 'DEFAULT_EVAL_TRIAL_RESOURCES'),
             defaultSource: 'submission-default',
             inspectorPath: join(
@@ -120,6 +152,7 @@ export class HitchPreparedRuntime implements HitchRuntimeAccess {
               runtimeDirectory: controller.directory,
               runtimeId: controller.runtime_id,
               runtimeContract: runtime,
+              ...(localTransport === undefined ? {} : { localTransport }),
               env: process.env,
               signal,
             }),
@@ -159,7 +192,7 @@ export class HitchPreparedRuntime implements HitchRuntimeAccess {
     environment: HitchEnvironment,
     signal: AbortSignal,
   ): Promise<void> {
-    return bounded(signal, async (signal) => {
+    return bounded(signal, hitchSettings(profile).preparationTimeoutMs, async (signal) => {
       const sdk = await openHitchSdk(profile, environment)
       await sdk.check(signal)
       const seen = new Set<string>()

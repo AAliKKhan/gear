@@ -8,7 +8,13 @@ import { GearError } from '../../domain/errors.js'
 import { validateAlgorithmWire } from '../../domain/algorithm-schema.js'
 import { fileLockHeld, withFileLock } from '../storage/file-lock.js'
 import { publishFile } from '../storage/atomic.js'
-import { capabilities, validateInput, type CodexInput, type CodexJob } from './contracts.js'
+import {
+  capabilities,
+  codexPassEnvNames,
+  validateInput,
+  type CodexInput,
+  type CodexJob,
+} from './contracts.js'
 import { describeCodex } from './identity.js'
 import { executeJob, exists } from './execution.js'
 import { initializeJournal, registerOperation, stateLost, withJournal } from './journal.js'
@@ -98,8 +104,8 @@ export async function codexOperation(raw: unknown): Promise<unknown> {
       await publishFile(jobPath, JSON.stringify(job), { immutable: true })
       // The intent precedes spawn. A crash in that gap remains unknown, never a blind retry.
       const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, LANG: 'C.UTF-8' }
-      for (const key of ['CODEX_API_KEY', 'OPENAI_API_KEY', 'GEAR_LOCK_PYTHON'])
-        if (process.env[key]) env[key] = process.env[key]
+      for (const key of [...codexPassEnvNames, 'GEAR_LOCK_PYTHON'])
+        if (process.env[key] !== undefined) env[key] = process.env[key]
       const child = spawn(process.execPath, [workerEntry, '--worker', directory], {
         env,
         detached: true,

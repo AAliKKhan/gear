@@ -10,36 +10,96 @@ import { promisify } from 'node:util'
 import { publishFile } from '../adapters/storage/atomic.js'
 import { withFileLock } from '../adapters/storage/file-lock.js'
 import { GearError } from '../domain/errors.js'
+import { benchmarkLimits } from '../adapters/python/benchmark-limits.js'
 const execute = promisify(execFile)
+const defaultAuthorTimeoutMs = 60_000
+const defaultMaxOutputBytes = 128 * 1024 * 1024
+const activeAuthors = new Set<(reason: GearError) => void>()
+const interruptAuthors = () => terminateAuthors('SIGINT', interruptAuthors)
+const terminateAuthorProcesses = () => terminateAuthors('SIGTERM', terminateAuthorProcesses)
+function stopAuthors() {
+  for (const stop of activeAuthors)
+    stop(new GearError('python-interrupted', 'Python author tool interrupted'))
+}
+function terminateAuthors(signal: NodeJS.Signals, listener: () => void) {
+  // Prepend our listener so existing once-handlers still count before they run.
+  const defaultTermination = process.listenerCount(signal) === 1
+  stopAuthors()
+  if (defaultTermination) {
+    process.off(signal, listener)
+    process.kill(process.pid, signal)
+  }
+}
+function trackAuthor(stop: (reason: GearError) => void): () => void {
+  if (!activeAuthors.size) {
+    process.prependListener('SIGINT', interruptAuthors)
+    process.prependListener('SIGTERM', terminateAuthorProcesses)
+    process.on('exit', stopAuthors)
+  }
+  activeAuthors.add(stop)
+  return () => {
+    activeAuthors.delete(stop)
+    if (!activeAuthors.size) {
+      process.off('SIGINT', interruptAuthors)
+      process.off('SIGTERM', terminateAuthorProcesses)
+      process.off('exit', stopAuthors)
+    }
+  }
+}
 export { packageRoot, pythonSourceRoot, managedPythonRoot } from '../adapters/python/interpreter.js'
 export async function pythonExecutable(): Promise<string> {
   return resolvePythonExecutable()
 }
-export async function pythonJson(args: string[], input: unknown): Promise<unknown> {
+export async function pythonJson(args: string[], input: unknown, signal?: AbortSignal): Promise<unknown> {
   const python = await pythonExecutable()
   const { spawn } = await import('node:child_process')
+  signal?.throwIfAborted()
+  const limits = args[0] === 'benchmark' ? benchmarkLimits() : undefined
+  const timeoutMs = limits?.authorTimeoutMs ?? defaultAuthorTimeoutMs
+  const maxOutputBytes = limits?.maxOutputBytes ?? defaultMaxOutputBytes
+  const payload = JSON.stringify(input)
   return new Promise((resolve, reject) => {
     const child = spawn(python, ['-m', 'gear', ...args], {
       env: { ...process.env, PYTHONPATH: pythonSourceRoot, GEAR_NODE: process.execPath },
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     })
     const chunks: Buffer[] = []
     let outputBytes = 0,
-      overflow = false,
       stderr = ''
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new GearError('python-timeout', 'Python author tool timed out'))
-    }, 60_000)
+    let failure: unknown
+    const stop = (error: unknown) => {
+      failure ??= error
+      if (child.pid) {
+        try {
+          process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL')
+        } catch (killError) {
+          if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') failure = killError
+        }
+      }
+    }
+    const abort = () => stop(signal!.reason)
+    const releaseAuthor = trackAuthor(stop)
+    signal?.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(
+      () =>
+        stop(
+          new GearError(
+            'python-timeout',
+            limits
+              ? 'Benchmark author tool timed out; adjust authorTimeoutMs in GEAR_BENCHMARK_LIMITS_JSON'
+              : 'Python author tool timed out',
+          ),
+        ),
+      timeoutMs,
+    )
     child.on('error', (error) => {
-      clearTimeout(timer)
-      reject(error)
+      failure ??= error
     })
     child.stdout.on('data', (chunk) => {
       outputBytes += chunk.length
-      if (outputBytes > 128 * 1024 * 1024) {
-        overflow = true
-        child.kill('SIGKILL')
+      if (outputBytes > maxOutputBytes) {
+        stop(new GearError('python-output-limit', 'Python author tool exceeded its output byte budget'))
       } else chunks.push(chunk)
     })
     child.stderr.on('data', (chunk) => {
@@ -48,8 +108,11 @@ export async function pythonJson(args: string[], input: unknown): Promise<unknow
     child.stdin.on('error', () => {})
     child.on('close', (code) => {
       clearTimeout(timer)
-      if (overflow) {
-        reject(new GearError('python-output-limit', 'Python author tool output exceeds 128 MiB'))
+      signal?.removeEventListener('abort', abort)
+      releaseAuthor()
+      // Wait for close before settling: a timeout is not evidence the child stopped.
+      if (failure !== undefined) {
+        reject(failure)
         return
       }
       if (code !== 0) {
@@ -79,7 +142,7 @@ export async function pythonJson(args: string[], input: unknown): Promise<unknow
         reject(new GearError('python-invalid-response', 'Python command did not return valid JSON'))
       }
     })
-    child.stdin.end(JSON.stringify(input))
+    child.stdin.end(payload)
   })
 }
 export async function setupPython(

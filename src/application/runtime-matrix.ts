@@ -10,6 +10,7 @@ export const runtimeMatrix = {
     controller_runtime_observation: '2',
     local_execution_observation: '2',
     evaluation_environment_binding: '3',
+    evaluation_preparation: '1',
     evaluation_artifact_pins: '1',
   },
   baseImage: 'python:3.12-slim',

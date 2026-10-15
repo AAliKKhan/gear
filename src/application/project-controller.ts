@@ -139,6 +139,8 @@ export class ProjectController {
         'passEnv',
         'timeoutMs',
         'maxConcurrent',
+        'preparationTimeoutMs',
+        'setupTimeoutMs',
         'authHome',
         'allowedDomains',
       ])

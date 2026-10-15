@@ -68,3 +68,46 @@ it('rejects missing task coverage rather than silently freezing a partial benchm
   sdk.call.mockImplementation(async (...args) => args[1] === 'resolveLocalTaskPlanningInputs' ? [{ task_id: 'a' }] : original(...args))
   await expect(new HitchPreparedRuntime().prepare(profile, context, connection, signal)).rejects.toMatchObject({ code: 'hitch-artifact-identity' })
 })
+
+it('exports a pinned local Git source once and mounts the verified transport in each platform builder', async () => {
+  const commit = 'a'.repeat(40), original = sdk.call.getMockImplementation()!
+  const selected = { ...profile, harnessRef: `deepseek@git+file:///custom/runtime#${commit}` }
+  let transport: unknown, temporary = ''
+  sdk.call.mockImplementation(async (...args) => {
+    const [, key, input] = args
+    if (key === 'parseHarnessReference') return { selector: { type: 'commit', value: commit, source: { explicit: true, local_path: '/custom/runtime' } } }
+    if (key === 'resolveHarness') return { identity: connection.revisionIdentity, revision: { commit } }
+    if (key === 'buildLocalGitTransport') {
+      temporary = input.evalDirectory
+      expect(input.sourceDirectory).toBe('/custom/runtime')
+      expect(input.signal.aborted).toBe(false)
+      await mkdir(temporary + '/local-source')
+      transport = { directory: temporary + '/local-source', manifest: { commit } }
+      return transport
+    }
+    const result = await original(...args)
+    if (key === 'prepareHarborArtifact') {
+      expect(input.localTransport).toBe(transport)
+      result.artifact.source_type = 'git'
+    }
+    return result
+  })
+  const bindings = await new HitchPreparedRuntime().prepare(selected, context, connection, signal)
+  expect(bindings).toHaveLength(3)
+  expect(sdk.call.mock.calls.filter(([, key]) => key === 'buildLocalGitTransport')).toHaveLength(1)
+  expect(sdk.call.mock.calls.filter(([, key]) => key === 'prepareHarborArtifact')).toHaveLength(2)
+  await expect(access(temporary)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('rejects a local Git resolution for a different commit before exporting or compiling', async () => {
+  const original = sdk.call.getMockImplementation()!, commit = 'a'.repeat(40)
+  sdk.call.mockImplementation(async (...args) => {
+    if (args[1] === 'parseHarnessReference') return { selector: { type: 'commit', value: commit, source: { explicit: true, local_path: '/custom/runtime' } } }
+    if (args[1] === 'resolveHarness') return { identity: connection.revisionIdentity, revision: { commit: 'b'.repeat(40) } }
+    return original(...args)
+  })
+  await expect(new HitchPreparedRuntime().prepare({ ...profile, harnessRef: `deepseek@git+file:///custom/runtime#${commit}` }, context, connection, signal))
+    .rejects.toMatchObject({ code: 'hitch-revision-drift' })
+  expect(context.compile).not.toHaveBeenCalled()
+  expect(sdk.call.mock.calls.filter(([, key]) => key === 'buildLocalGitTransport')).toHaveLength(0)
+})

@@ -37,6 +37,7 @@ export async function resolveProject(
       'benchmark',
       'target',
       'meta',
+      'sandbox',
       'generation',
       'algorithm',
       'objective',
@@ -53,6 +54,9 @@ export async function resolveProject(
   if (raw.version !== 1) throw new GearError('unsupported-config-version', 'gear.yaml version must be 1')
   const target = object(raw.target, ['adapter', 'path', 'profile'], 'target'),
     meta = object(raw.meta, ['profile'], 'meta')
+  const sandbox = raw.sandbox === undefined ? undefined : object(raw.sandbox, ['linux_isolation'], 'sandbox')
+  if (sandbox && !['seccomp', 'bubblewrap-only'].includes(String(sandbox.linux_isolation)))
+    throw new GearError('invalid-config', 'sandbox.linux_isolation must be seccomp or bubblewrap-only')
   if (!['dsh', 'pi'].includes(String(target.adapter)))
     throw new GearError('unknown-target-adapter', 'Target adapter must be dsh or pi')
   const budgetInput = raw.budget
@@ -114,6 +118,9 @@ export async function resolveProject(
       profile: string(target.profile, 'target.profile'),
     },
     meta: { profile: string(meta.profile, 'meta.profile') },
+    ...(sandbox
+      ? { sandbox: { linux_isolation: sandbox.linux_isolation as 'seccomp' | 'bubblewrap-only' } }
+      : {}),
     ...(raw.generation === undefined
       ? {}
       : { generation: raw.generation as NonNullable<ProjectConfig['generation']> }),
@@ -146,6 +153,7 @@ export async function resolveProject(
   )
   for (const key of ['max_retries', 'max_projections', 'backoff_ms'])
     origins[`evaluation.repair.${key}`] = key in repairInput ? 'gear.yaml' : 'template default'
+  origins['sandbox.linux_isolation'] = sandbox ? 'gear.yaml' : 'template default'
   if (config.generation) {
     for (const key of ['max_model_requests', 'max_tokens'] as const) {
       if (config.generation[key] !== undefined) origins[`generation.${key}`] = 'gear.yaml'

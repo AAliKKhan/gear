@@ -115,6 +115,7 @@ export async function prepareSandbox(job: CodexJob, runtime: Awaited<ReturnType<
         throw new GearError('codex-sandbox-overlap', 'Private project state overlaps the Meta read allowlist')
     }
     const policy = await createAirGappedSandboxConfig({
+      linuxIsolation: config.linuxIsolation,
       allowRead,
       allowWrite: [
         output,
@@ -128,11 +129,22 @@ export async function prepareSandbox(job: CodexJob, runtime: Awaited<ReturnType<
       deniedDomains: config.allowedDomains.length ? [] : ['*'],
       strictAllowlist: true,
       allowUnixSockets: experience.sockets,
-      allowAllUnixSockets: false,
+      allowAllUnixSockets: process.platform === 'linux' && config.linuxIsolation === 'bubblewrap-only',
       allowLocalBinding: false,
     }
     // Each operation worker owns a separate manager; no shared process-wide network policy.
     await SandboxManager.initialize(policy)
+    await SandboxManager.waitForNetworkInitialization()
+    if (process.platform === 'linux') {
+      // The root read-deny mount otherwise hides the proxy socket binds added
+      // earlier by bubblewrap. Expose only this manager's filtered bridges.
+      policy.filesystem.allowRead = [
+        ...(policy.filesystem.allowRead ?? []),
+        ...[SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()].filter(
+          (socket): socket is string => socket !== undefined,
+        ),
+      ]
+    }
     const args = [
       executable,
       'exec',

@@ -45,7 +45,7 @@ export function runOrderedHitchFixture(runtimeIdentity) {
   }
   const reply = value => ({ ...value, submitted: !!state.jobsById[value.eval_id], pending_reruns: false })
   if (command === 'resolve') emit({ identity: runtimeIdentity })
-  else if (command === 'capabilities') emit({ schema_version: '1', ordered_eval_control: '2', controller_runtime_observation: '2', local_execution_observation: '2', evaluation_environment_binding: '3', evaluation_artifact_pins: '1', ...(state.verifier ? { verifier_evidence: '1' } : {}) })
+  else if (command === 'capabilities') emit({ schema_version: '1', ordered_eval_control: '2', controller_runtime_observation: '2', local_execution_observation: '2', evaluation_environment_binding: '3', evaluation_preparation: '1', evaluation_artifact_pins: '1', ...(state.verifier ? { verifier_evidence: '1' } : {}) })
   else if (command === 'eval' && action === 'bind') emit({ schema_version: '1', provider: 'local-docker', nonce: 'b'.repeat(32), daemon_instance_id: instance, binding: { schema_version: '1', binding_id: state.environmentBinding ?? 'hmac-sha256:' + digest('resident-environment').slice(7), model: option('--model'), pass_env: [...new Set(repeated('--pass-env'))].sort(), expires_at_ms: null } })
   else if (command === 'daemon') emit({ status: 'running', instance_id: instance })
   else if (command === 'training' && action === 'runtime') emit(controller)
@@ -90,7 +90,7 @@ export function runOrderedHitchFixture(runtimeIdentity) {
       const request = { schema_version: '1', backend: 'harbor', dataset: option('--dataset'),
         harness_ref: option('--harness'), model: option('--model'), environment_binding: option('--environment-binding'), artifact_pins: artifactPins, attempts: Number(option('--attempts')),
         max_concurrent: Number(option('--max-concurrent')), infrastructure_retries: Number(option('--infrastructure-retries')),
-        timeout_ms: Number(option('--timeout').replace(/ms$/, '')), agent_args: repeated('--agent-arg'), pass_env: repeated('--pass-env') }
+        timeout_ms: Number(option('--timeout').replace(/ms$/, '')), setup_timeout_ms: Number(option('--setup-timeout')?.replace(/ms$/, '') ?? 1800000), agent_args: repeated('--agent-arg'), pass_env: repeated('--pass-env') }
       const job = { eval_id: value.eval_id, dataset: request.dataset, request, controller, artifactId: state.artifactIds?.[state.jobs ?? 0] ?? state.preparedArtifactId, provider: option('--provider'), state: 'succeeded' }
       state.jobsById[value.eval_id] = job; state.job = job; state.jobs = (state.jobs ?? 0) + 1
       if (state.loseSubmitReply) { state.loseSubmitReply = false; fail() }

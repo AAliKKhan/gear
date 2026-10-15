@@ -8,6 +8,56 @@ from gear.refine.protocol import validate
 
 
 class AlgorithmTests(unittest.TestCase):
+    def test_large_candidate_allocations_finish_without_dropping_candidates(self):
+        from gear.algorithms import SearchView, Budget, Candidate, Task, AlgorithmState
+        from gear.algorithms.contracts import OperationResult
+        from gear.algorithms.testkit import wire
+        from gear.algorithms.limits import MAX_DECISION_OPERATIONS
+
+        for count in (64, 129):
+            with self.subTest(candidates=count):
+                algorithm = RandomSearch()
+                view = SearchView("large", 0, "fixed", (Task("a", "a"),),
+                                  (Candidate("anchor", digest("anchor")),), (), (),
+                                  Budget(count * 2 + 1, count, 1), "anchor")
+                state = AlgorithmState()
+                generated, evaluated = set(), set()
+                for _ in range(50):
+                    decision = algorithm.step(view, state)
+                    validate("Decision", wire(decision))
+                    self.assertLessEqual(len(decision.operations), MAX_DECISION_OPERATIONS)
+                    state = decision.state
+                    if decision.operations[0].kind in ("stop", "nominate"):
+                        break
+                    for index, operation in enumerate(decision.operations):
+                        result = OperationResult(f"{view.step_id}:{index}", operation.kind,
+                                                 "complete", operation.candidate_id)
+                        if operation.kind == "diagnose_seed":
+                            result = replace(result, data={"hypotheses": ["Improve accuracy"]})
+                        elif operation.kind == "generate_candidate":
+                            candidate = operation.candidate_id
+                            self.assertNotIn(candidate, generated)
+                            generated.add(candidate)
+                            view = replace(view, candidates=view.candidates + (
+                                Candidate(candidate, digest(candidate), operation.parent_id),),
+                                budget=replace(view.budget,
+                                               candidates_remaining=view.budget.candidates_remaining - 1))
+                        elif operation.kind == "evaluate_seed":
+                            candidate = operation.candidate_id
+                            if candidate not in evaluated:
+                                evaluated.add(candidate)
+                                view = replace(view, evidence=view.evidence + (
+                                    Evidence(candidate, "a", 0, 0 if candidate == "anchor" else 0.5,
+                                             "valid", operation.scope),),
+                                    budget=replace(view.budget,
+                                                   evaluations_remaining=view.budget.evaluations_remaining - 1))
+                        view = replace(view, completed=view.completed + (result,))
+                    view = replace(view, step_id=view.step_id + 1)
+                else:
+                    self.fail("large candidate allocation did not reach a terminal decision")
+                self.assertEqual(len(generated), count)
+                self.assertEqual(evaluated, generated | {"anchor"})
+
     def test_many_solved_rounds_finish_without_recursive_decisions(self):
         from gear.algorithms import SearchView, Budget, Candidate, Task, AlgorithmState
         view = SearchView("solved", 1, "fixed", (Task("a", "a"),), (Candidate("anchor", digest("anchor")),),

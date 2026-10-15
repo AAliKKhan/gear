@@ -74,7 +74,8 @@ function object(value: unknown): Record<string, unknown> {
 }
 const digest = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value)
 function artifact(value: unknown, expected: ArtifactSelection): Artifact {
-  const r = object(value)
+  const r = object(value),
+    selector = expected.harnessRef.slice(expected.harnessRef.indexOf('@') + 1)
   check(
     digest(r.artifact_id) &&
       digest(r.artifact_integrity) &&
@@ -84,7 +85,7 @@ function artifact(value: unknown, expected: ArtifactSelection): Artifact {
       ['linux-x64', 'linux-arm64'].includes(String(r.platform)) &&
       typeof r.node_version === 'string' &&
       /^v\d+\.\d+\.\d+$/u.test(r.node_version) &&
-      r.source_type === (expected.harnessRef.includes('@version:') ? 'npm' : 'git') &&
+      r.source_type === (selector.startsWith('version:') ? 'npm' : 'git') &&
       r.storage === 'harbor-artifact-cache-v2',
   )
   return Object.fromEntries(

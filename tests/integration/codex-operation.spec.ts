@@ -4,7 +4,8 @@ import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { afterEach, describe, expect, it } from 'vitest'
+import { createServer } from 'node:http'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProcessOperationProvider } from '../../src/adapters/process/operation-provider.js'
 import { configuredCancellation } from '../../src/application/cancellation.js'
 import { describeCodex } from '../../src/adapters/codex/identity.js'
@@ -22,6 +23,7 @@ import type { ExperienceRecord, ExperienceContext } from '../../src/domain/exper
 
 const roots: string[] = []
 afterEach(async () => {
+  vi.unstubAllEnvs()
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
 })
 async function fixture(mode = 'success', adapter: 'pi' | 'dsh' = 'pi', prepare = true) {
@@ -64,6 +66,14 @@ for path in [${JSON.stringify(join(privateRoot, 'held-out.json'))},${JSON.string
   raise AssertionError('PRIVATE_FILE_READABLE')
  except (PermissionError,FileNotFoundError): pass
 assert 'GEAR_META_SECRET' not in os.environ
+if ${JSON.stringify(mode)}=='proxy':
+ import urllib.request,urllib.error
+ assert 'PROXY_CREDENTIAL_CANARY' not in repr(dict(os.environ))
+ assert urllib.request.urlopen('http://allowed.gear.test/probe',timeout=5).read()==b'upstream reached'
+ try:
+  urllib.request.urlopen('http://denied.gear.test/probe',timeout=5)
+  raise AssertionError('DENIED_DOMAIN_REACHED')
+ except urllib.error.HTTPError as error: assert error.code==403,error.code
 if 'experience' in view:
  memory=view['experience']
  assert memory['cards'][0]['classification']['effect']=='regressed'
@@ -127,8 +137,9 @@ if ${JSON.stringify(mode)}=='partialfailed':
   const profile = {
     command: [process.execPath, resolve('assets/codex-meta-runner.mjs')],
     workingDirectory: root,
-    configuration: { executable, model: 'fixture-model', allowedDomains: [], timeoutMs: 12_000 },
-    passEnv: [],
+    configuration: { executable, model: 'fixture-model', allowedDomains: mode === 'proxy' ? ['allowed.gear.test'] : [], timeoutMs: 12_000,
+      ...(process.env.GEAR_TEST_LINUX_ISOLATION ? { linuxIsolation: process.env.GEAR_TEST_LINUX_ISOLATION as 'seccomp' | 'bubblewrap-only' } : {}) },
+    passEnv: mode === 'proxy' ? ['HTTP_PROXY', 'NO_PROXY'] : [],
     timeoutMs: 20_000,
   }
   const context = {
@@ -201,6 +212,30 @@ async function untilStarted(directory: string) {
   throw new Error('fake Codex did not start')
 }
 describe('formal Codex operation runner', () => {
+  it('chains explicit upstream proxies without exposing credentials or bypassing domain restrictions', async () => {
+    const requests: string[] = []
+    const authorization: Array<string | undefined> = []
+    const proxy = createServer((request, response) => {
+      requests.push(request.url ?? '')
+      authorization.push(request.headers['proxy-authorization'])
+      response.end('upstream reached')
+    })
+    await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = proxy.address() as { port: number }
+      vi.stubEnv('HTTP_PROXY', `http://fixture:PROXY_CREDENTIAL_CANARY@127.0.0.1:${address.port}`)
+      vi.stubEnv('NO_PROXY', 'denied.gear.test')
+      const f = await fixture('proxy')
+      const receipt = await f.provider.submit(f.request, signal())
+      expect(receipt.result.status, await readFile(join(f.directory, 'stderr.log'), 'utf8')).toBe('complete')
+      expect(requests).toEqual(['http://allowed.gear.test/probe'])
+      expect(authorization).toEqual([`Basic ${Buffer.from('fixture:PROXY_CREDENTIAL_CANARY').toString('base64')}`])
+      expect(await readFile(join(f.directory, 'job.json'), 'utf8')).not.toContain('PROXY_CREDENTIAL_CANARY')
+    } finally {
+      proxy.closeAllConnections()
+      await new Promise<void>((resolve, reject) => proxy.close(error => error ? reject(error) : resolve()))
+    }
+  })
   it('binds the optional code-mode companion to the runtime identity', async () => {
     const { profile, root } = await fixture()
     const before = await describeCodex(profile.configuration)

@@ -3,10 +3,10 @@ import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { acquireAirGappedSandbox } from '../sandbox.js'
+import { acquireAirGappedSandbox, type LinuxSandboxIsolation } from '../sandbox.js'
 import { codexAuthFile } from '../adapters/codex/auth.js'
 import { describeCodex } from '../adapters/codex/identity.js'
-import { capabilities as codexCapabilities } from '../adapters/codex/contracts.js'
+import { capabilities as codexCapabilities, codexCredentialEnvNames } from '../adapters/codex/contracts.js'
 import { ProcessOperationProvider } from '../adapters/process/operation-provider.js'
 import { inspectHitchConnection, hitchCapabilities } from '../adapters/hitch/connection.js'
 import { hitchJson } from '../adapters/hitch/transport.js'
@@ -71,13 +71,9 @@ export async function doctor(root: string) {
     )
     return { executable, ...(JSON.parse(stdout) as { version: string }) }
   })
-  await probe('isolation', 'Install the supported OS sandbox tools; see the installation guide', async () => {
-    const lease = await acquireAirGappedSandbox(undefined, 'Gear doctor')
-    await lease.release()
-    return { platform: process.platform, process_probe: 'passed' }
-  })
   let selection: Partial<Record<ProfileRole, string>> = {},
     adapter: 'dsh' | 'pi' | undefined
+  let linuxIsolation: LinuxSandboxIsolation | undefined
   await probe('configuration', 'gear config explain', async () => {
     const hasProject = await access(join(root, 'gear.yaml')).then(
       () => true,
@@ -90,11 +86,25 @@ export async function doctor(root: string) {
       const { config } = await resolveProject(root)
       selection = { target: config.target.profile, meta: config.meta.profile }
       adapter = config.target.adapter
+      linuxIsolation = config.sandbox?.linux_isolation
       return { scope: 'project', adapter }
     }
     selection = await defaultProfiles()
     return { scope: 'default' }
   })
+  await probe(
+    'isolation',
+    'Configure the supported OS sandbox tools and sandbox.linux_isolation; see the configuration guide',
+    async () => {
+      const lease = await acquireAirGappedSandbox(linuxIsolation, 'Gear doctor')
+      await lease.release()
+      return {
+        platform: process.platform,
+        linux_isolation: linuxIsolation ?? 'seccomp',
+        process_probe: 'passed',
+      }
+    },
+  )
   const authentication: Partial<
     Record<ProfileRole, { status: string; names?: string[]; next_action?: string }>
   > = {}
@@ -115,7 +125,9 @@ export async function doctor(root: string) {
       assertProfileRole(value, role, adapter)
       if ('kind' in value && value.kind === 'codex') {
         const runtime = await describeCodex(value.configuration)
-        const present = value.passEnv.filter((key) => !!process.env[key]?.trim())
+        const present = value.passEnv.filter(
+          (key) => codexCredentialEnvNames.includes(key) && !!process.env[key]?.trim(),
+        )
         if (value.configuration.authHome) {
           // Check the exact credential file copied into real operations, without reading user config or printing credentials.
           const temporary = await mkdtemp(join(tmpdir(), 'gear-auth-check-'))

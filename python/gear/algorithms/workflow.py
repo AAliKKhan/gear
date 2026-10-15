@@ -26,6 +26,7 @@ from .contracts import (
     TaskSampler,
 )
 from .evidence import task_scores
+from .limits import MAX_DECISION_OPERATIONS
 from .objective import comparison_key, score_ceiling
 from .random import DeterministicRandom
 from .validation import validate_parent_plan, validate_sampling_plan
@@ -219,17 +220,19 @@ class StagedSearch:
         )
         if not plan.allocations:
             return self._record(self._finish(view, state, plan.reason), research)
-        # Preserve every allocation and its entire probability distribution in
-        # the committed state. Each batch consumes only its own diagnosis.
+        # Preserve the complete allocation while splitting transport batches.
+        # Evaluation includes the parent, so reserve one operation for that pair.
+        batch_capacity = MAX_DECISION_OPERATIONS - 1
         batches: list[JSON] = [
             {
                 "parent": allocation.selection.option.candidate_id,
                 "scope": allocation.selection.option.scope,
                 "tasks": list(allocation.selection.option.task_ids),
-                "count": allocation.count,
+                "count": min(batch_capacity, allocation.count - offset),
                 "selection": json.loads(json.dumps(asdict(allocation.selection))),
             }
             for allocation in plan.allocations
+            for offset in range(0, allocation.count, batch_capacity)
         ]
         data = {
             **state.data,
