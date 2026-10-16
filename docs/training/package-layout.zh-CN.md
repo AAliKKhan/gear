@@ -37,7 +37,7 @@ TypeScript 控制器与项目评估共用 `src/adapters/hitch/environment.ts` �
 | 节点 RPC | `python -m gear.training.cli.node` |
 | 后端作业 | `python -m gear.training.cli.job` |
 | 自定义脚本作业 | `python -m gear.training.cli.script_job` |
-| 推理进程监督 | `python -m gear.training.cli.inference` |
+| 受管原生部署 | `python -m gear.training.cli.native_deployment` |
 | Slime actor 进程 | `python -m gear.training.cli.slime` |
 | CUDA 设备枚举 | `python -m gear.training.cli.gpu_inventory` |
 | 运行环境认证封存 | `python -m gear.training.cli.certify` |

@@ -1,6 +1,6 @@
 # Gear user guide
 
-These pages describe the 0.1.3 project-refactor branch, not a confirmed npm release.
+These pages describe Gear 0.2.0 and its project-based API.
 Python defines optimization policies; the durable runtime executes evaluations,
 candidate generation, recovery and final validation. The CLI, Python SDK,
 native DSH Skill and project socket use the same application service.

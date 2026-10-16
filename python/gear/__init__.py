@@ -2,5 +2,5 @@
 
 from .project import Project, ProjectError, Report, Run
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 __all__ = ["Project", "ProjectError", "Report", "Run"]
