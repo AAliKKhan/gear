@@ -42,3 +42,5 @@ GEAR_TRAINING_TEST_PYTHON="$VIRTUAL_ENV/bin/python" npm run test:training
 ```
 
 macOS 安装 Torch 时省略 `--index-url`。CI 的 `Training / CPU` 会运行 Python 测试。
+
+独立评测连接已部署的模型端点，每个不可变 HF 版本使用冻结绑定与可信部署回执，见[端点准备、比较与验收](../../training/standalone-inference.zh-CN.md)。训练与推理静态分卡；缺少可靠外部计量时共享推理 GPU 时间保持未知。新的 SGLang TP=1、TP=2 与官方 Gateway 路径仍需实机和真实 Harness 验收。

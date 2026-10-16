@@ -163,3 +163,5 @@ npm test
 ```
 
 [Contributing](CONTRIBUTING.md) · [Documentation guidelines](docs/guide/README.md) · [GitHub issues](https://github.com/rsi-gear/gear/issues) · [MIT license](LICENSE)
+
+Model evaluation connects to [already deployed model endpoints](docs/training/standalone-inference.md), with immutable bindings for each candidate and configurable trial concurrency. SGLang and its official Model Gateway manage inference replicas outside Gear and Hitch.

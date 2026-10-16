@@ -81,7 +81,13 @@
     "examples/algorithms/**",
     "assets/codex-meta-runner.mjs",
     "assets/codex-process-guard.py",
-    "docs/codex-meta-runner.zh-CN.md"
+    "docs/codex-meta-runner.zh-CN.md",
+    "docs/training/standalone-inference.md",
+    "docs/training/standalone-inference.zh-CN.md",
+    "docs/training/unattended-iteration.zh-CN.md",
+    "docs/training/managed-native.zh-CN.md",
+    "docs/unattended-model-iteration-design.zh-CN.md",
+    "docs/validation/unattended-scheduler-controlled-2026-10-15.json"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",

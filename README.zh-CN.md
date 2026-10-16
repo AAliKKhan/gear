@@ -163,3 +163,5 @@ npm test
 ```
 
 [贡献指南](CONTRIBUTING.md) · [文档维护说明](docs/guide/README.md) · [GitHub Issues](https://github.com/rsi-gear/gear/issues) · [MIT 许可](LICENSE)
+
+模型评测可接入[独立推理副本池](docs/training/standalone-inference.zh-CN.md)，显式配置张量并行、副本与 trial 并发。

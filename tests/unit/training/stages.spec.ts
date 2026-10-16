@@ -1,3 +1,4 @@
+import { fixtureEndpointPreparer } from './fixture.js'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -21,7 +22,7 @@ describe('controller stage worker bridge', () => {
     const spec = v2spec(await fixture(store))
     const config = { runner: 'different-provider', options: {}, instructionsRef: await store.putBytes(Buffer.from('Select complete native groups'), 'text/plain'), maxRepairs: 1, timeoutSeconds: 3 }
     spec.stages = { datasetBuilder: config }
-    const coordinator = new ModelTrainingCoordinator(store, new FixtureTrainer(store), new FixtureEvaluator(store))
+    const coordinator = new ModelTrainingCoordinator(store, new FixtureTrainer(store), new FixtureEvaluator(store), fixtureEndpointPreparer)
     const experiment = await coordinator.createExperiment(spec), request = (await coordinator.admit(experiment.id)).request as TrainingRequestV2
     const handle: TrainingHandle = { schemaVersion: 1, provider: 'slime', jobId: `job_${'a'.repeat(32)}`, requestDigest: digestJson(request) }
     const payload = { trainingRunId: request.trainingRunId, trajectories: [] }

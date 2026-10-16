@@ -189,6 +189,15 @@ def update_recovery(directory, request, store, ledger):
             "checkpoint-incompatible",
             "resume may not change runtime, reference, optimizer or model topology",
         )
+        require(
+            parent.get("actorStateRef")
+            == parent.get("optimizerStateRef")
+            == parent.get("schedulerAndRngRef")
+            and isinstance(parent.get("actorStateRef"), dict)
+            and isinstance(parent.get("dataCursorRef"), dict),
+            "incomplete-native-resume",
+            "accepted parents must preserve the complete synchronous actor, optimizer, scheduler/RNG and data cursor checkpoint",
+        )
     if request.get("offlineTraining"):
         from gear.training.data.offline import read_dataset, validate_cursor
 

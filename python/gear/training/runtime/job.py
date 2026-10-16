@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gear.training.runtime.execution import training_devices
@@ -32,6 +33,22 @@ from gear.training.storage.state import load, lock
 RESOURCE_RELEASE_PENDING = "training GPU processes remain; resources are not released"
 
 
+def experiment_deadline_expired(request, now=None):
+    deadline = request.get("deadlineAt")
+    if deadline is None:
+        return False
+    try:
+        parsed = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+        require(
+            parsed.tzinfo is not None,
+            "invalid-training-deadline",
+            "deadline must include its timezone",
+        )
+    except (TypeError, ValueError, AttributeError):
+        require(False, "invalid-training-deadline", "deadline must be an absolute ISO timestamp")
+    return (now or datetime.now(timezone.utc)) >= parsed
+
+
 def alive(pid):
     if type(pid) is not int or pid <= 0:
         return False
@@ -49,6 +66,11 @@ def worker_alive(worker):
 def device_ledger(config):
     if not config.get("node"):
         return None
+    require(
+        "deviceLeaseRuntime" not in config,
+        "removed-device-lease-runtime",
+        "training owns its Gear device ledger; remove the retired inference runtime selector",
+    )
     from gear.training.runtime.device_lease import NodeDeviceLedger
 
     return NodeDeviceLedger(config["nodeRoot"], config["node"])
@@ -190,6 +212,11 @@ class JobService:
                         journal.close()
                 elif not request.get("offlineTraining"):
                     asyncio.run(reconcile_slots(directory, request, self.config))
+            require(
+                not experiment_deadline_expired(request),
+                "experiment-deadline-exceeded",
+                "the original experiment wall clock deadline forbids another training incarnation",
+            )
             caps = preflight(request, self.config)
             require(
                 not caps["blockers"],
@@ -573,8 +600,16 @@ def worker(directory, incarnation):
                     usage["gpuSeconds"] >= request["budgets"]["totalGpuSeconds"]
                     or usage["rolloutTokens"] >= request["budgets"]["maxRolloutTokens"]
                 )
-                if budget_end and not (directory / "cancel.json").exists():
-                    atomic_json(directory / "cancel.json", {"reason": "budget-exhausted"})
+                deadline_end = experiment_deadline_expired(request)
+                if (budget_end or deadline_end) and not (directory / "cancel.json").exists():
+                    atomic_json(
+                        directory / "cancel.json",
+                        {
+                            "reason": "experiment-deadline-exceeded"
+                            if deadline_end
+                            else "budget-exhausted"
+                        },
+                    )
                 cancelled = (directory / "cancel.json").exists()
                 if cancelled and cancelling_at is None:
                     cancelling_at = now

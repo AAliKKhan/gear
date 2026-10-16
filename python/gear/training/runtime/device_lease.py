@@ -136,33 +136,6 @@ class NodeDeviceLedger:
                 entry["owner"].startswith(prefix) for entry in self._read()["owners"].values()
             )
 
-    def verify_active(self, owner, devices, required_processes):
-        """Read-only admission for reattaching an existing live engine."""
-        with lock(self.root / "device-leases.lock"):
-            entry = self._entry(self._read(), owner)
-            require(
-                not entry["closing"]
-                and "releasedAt" not in entry
-                and entry["devices"] == sorted(devices),
-                "device-lease-fenced",
-                "active service device ownership is not intact",
-            )
-            require(
-                required_processes
-                and all(p in entry["processes"] and owned_alive(p) for p in required_processes),
-                "inference-process-unconfirmed",
-                "supervisor or engine process identity is no longer live and owned",
-            )
-            if devices:
-                live = {p["pid"] for p in entry["processes"] if owned_alive(p)}
-                used = gpu_processes(devices)
-                require(
-                    {row["device"] for row in used} == set(devices)
-                    and all(row["pid"] in live for row in used),
-                    "inference-gpu-unconfirmed",
-                    "GPU compute ownership is not confirmed for the active service",
-                )
-
     def gpu_seconds(self, prefix):
         with lock(self.root / "device-leases.lock"):
             data = self._read()

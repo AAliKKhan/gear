@@ -247,13 +247,12 @@ def model_node_preflight(node_config, identity):
     report["node"] = identity
     ports = {
         "rollout": config.get("gatewayPort") if isinstance(config, dict) else None,
-        "inference": node_config.get("inferencePort"),
     }
     report["ports"] = {
         key: port if type(port) is int and 1 <= port <= 65535 else None
         for key, port in ports.items()
     }
-    valid_ports = all(report["ports"].values()) and len(set(report["ports"].values())) == 2
+    valid_ports = all(report["ports"].values())
     report["checks"].append(
         {
             "code": "model-gateway-configuration",

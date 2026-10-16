@@ -17,12 +17,14 @@ try {
 import assert from 'node:assert/strict';
 import * as api from 'rsi-gear';
 import * as skill from 'rsi-gear/skill';
+import * as training from 'rsi-gear/training';
 assert.equal(typeof api.ProjectApplication, 'function');
 assert.equal(typeof api.ProjectController, 'function');
 assert.equal(skill.createProjectControlPlane, api.createProjectControlPlane);
 for (const key of ['RefineService','FailureClusterSearch','ComponentRegistry','builtinComponentRef']) assert.equal(key in api, false);
 assert.equal('createSkillControlPlane' in skill, false);
 assert.equal('parseSkillHarnessIdentity' in skill, false);
+for (const key of ['ModelIterationController', 'runIteration', 'ManagedNativeEndpointPreparer', 'parseNativeDeploymentProfile']) assert.equal(typeof training[key], 'function');
 for (const path of ['rsi-gear/search','rsi-gear/search/api','rsi-gear/testing','rsi-gear/worker']) {
   await assert.rejects(import(path), {code:'ERR_PACKAGE_PATH_NOT_EXPORTED'});
 }
@@ -31,6 +33,11 @@ console.log('Public project API passed; algorithm authoring is Python-only');
   assert.match(output, /Public project API passed/u)
   process.stdout.write(output)
   const packageFiles = new Set(packed.files.map(file => file.path))
+  for (const file of ['docs/training/unattended-iteration.zh-CN.md', 'docs/training/managed-native.zh-CN.md',
+    'docs/unattended-model-iteration-design.zh-CN.md', 'docs/validation/unattended-scheduler-controlled-2026-10-15.json',
+    'examples/training-loop/unattended/prepare.mjs', 'examples/training-loop/managed-native/prepare-profile.py',
+    'python/gear/training/cli/native_deployment.py', 'python/gear/training/runtime/native_deployment.py',
+    'python/gear/training/runtime/native_supervisor.py']) assert.ok(packageFiles.has(file), file)
   for (const file of ['assets/codex-meta-runner.mjs', 'assets/codex-process-guard.py', 'lib/adapters/codex/runner.js']) assert.ok(packageFiles.has(file), file)
   for (const file of ['assets/codex-skill-meta-runner.mjs', 'skills/refine/scripts/transport.mjs', 'lib/search/api.js', 'lib/search/index.js', 'lib/search/testing.js', 'lib/testing.js']) assert.ok(!packageFiles.has(file), file)
   for (const file of packageFiles) assert.ok(!/^(?:tests\/|fixture-lib\/|lib\/(?:search|refine|evaluator|meta|notebook|worker|candidate|experience)\/|lib\/state\/store\.|lib\/types\.)/u.test(file), `Retired implementation leaked into the package: ${file}`)

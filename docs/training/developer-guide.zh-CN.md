@@ -150,6 +150,7 @@ local-training/
 ├── grpo-base.json        # 完整 GRPO spec：模型、运行时、优化器、预算、评估
 ├── sft-base.json         # SFT 对应配置；示例入口会补 datasetRef 和工厂
 ├── bindings.json         # TB 各任务的真实 Hitch 环境/任务/verifier 身份
+├── endpoint-bindings.json # 按不可变 HF digest 索引的外部 ready binding 文件
 └── tb-sft-input.json     # 审核过的 TB train 监督记录
 ```
 
@@ -162,7 +163,8 @@ local-training/
 3. 将模型放到 GPU 节点并用 `seal-hf-node` 封存。`initialModel` 填返回的 `modelRef`；在线 GRPO 的 `referenceModel` 是固定 KL 参照，后续轮次不会自动改成上一轮模型。SFT 不加载 reference actor。
 4. 为模型选择完整的 Slime 参数，封存为 `hyperparametersRef`。GRPO / SFT 分别准备，不能只改 recipe 名称就把在线参数直接用于 SFT。
 5. 从实际 Hitch 基线 / canonical 记录提取 task bindings，并固定**实际执行任务的 runner artifact**。Mac 控制端构建的 artifact 不能代替 Linux 执行端的 artifact。
-6. 完成适用的 GPU 运行时探针和认证，将真实证据封存到 runtime lock；正式入口不接受 `pending-gpu` lock。认证流程见 [GPU 验证](README.zh-CN.md#gpu-验证与认证)。
+6. 为 baseline 的不可变 HF snapshot 准备、验证外部模型端点，将可信部署回执与冻结绑定写入 controller.evaluationBindings 所指的 digest 映射。每个 candidate 导出后同样准备自己的绑定；缺失时运行等待部署，不使用旧模型代替。字段与步骤见[独立评测端点](standalone-inference.zh-CN.md)。
+7. 完成适用的 GPU 运行时探针和认证，将真实证据封存到 runtime lock；正式入口不接受 pending-gpu lock。认证流程见[GPU 验证](README.zh-CN.md#gpu-验证与认证)。新的上游端点和静态分卡验收单独保留实际证据。
 
 部署检查命令，在配置对应的控制端执行：
 
@@ -174,7 +176,7 @@ node lib/cli.js training seal-hf-node /models/Qwen3.5-2B --config local-training
 
 `/models/Qwen3.5-2B` 是 GPU 节点上的路径，替换为自己的模型目录。检查通过和已有调试记录都不能替代新环境的正式认证。
 
-单卡 GRPO 使用 colocated actor/rollout 和 sequential train/evaluation；SFT 训练为 actor-only。设备填实际 GPU UUID，容量取决于模型、序列长度、batch 和 CPU offload。`Qwen3.5-2B` 是已有单卡调试目标，相关适配及验证边界见 [调试记录](debugging/2026-10-02-qwen3.5-2b/README.zh-CN.md)。
+训练内部单卡 GRPO 可使用 colocated actor/rollout，SFT 为 actor-only。普通评测使用独立保留的推理卡，v2 trainEvaluation=isolated，resources 只列 trainingDevices；单卡训练加单卡推理至少需要两张卡，可位于不同主机。预算显式设 gpuSecondsScope=training；共享推理 GPU 时间未知时不补零。设备填实际 UUID，容量仍取决于模型、序列、batch 与 CPU offload。Qwen3.5-2B 的历史单卡调试材料见[调试记录](debugging/2026-10-02-qwen3.5-2b/README.zh-CN.md)，不能代替新端点路径的验收。
 
 ## 4. 示例一：Terminal-Bench GRPO
 
@@ -209,7 +211,7 @@ git -C ../terminal-bench-2-1 rev-parse HEAD
 
 在 `grpo-base.json` 中选 `trainer.recipe="agent-grpo-v1"`。先验证两轮时，设 `trainer.updatesPerCandidate=2`；B=1、G=2、global batch=2、DP=1 可作为 batch 配置起点，相应 Slime 每 rollout steps=1。模型结构、序列上限、优化器和 GPU 预算仍由自己的完整 base spec 指定。
 
-**一条命令封存、校验、启动多轮及独立评估：**
+**一条命令封存、校验并持续协调多轮；候选端点缺失时等待外部准备：**
 
 ```sh
 python examples/training-loop/terminal-bench-2.1/prepare.py \
@@ -276,7 +278,7 @@ records:
 
 SFT 使用独立 optimizer lineage 和适用于 SFT 的 runtime 证据；不能把 GRPO optimizer checkpoint 或 GRPO 证书直接当作 SFT 的续训状态。`fixedHarness`、verifier、dev / held-out、预算和评估 policy 仍保留。
 
-**一条命令封存、校验、启动 SFT 多轮及独立评估：**
+**一条命令封存、校验并持续协调 SFT 多轮；候选端点缺失时等待外部准备：**
 
 ```sh
 python examples/training-loop/terminal-bench-2.1/prepare.py \
