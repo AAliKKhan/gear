@@ -15,20 +15,23 @@ describe('published Gear bundle', () => {
       exports?: Record<string, unknown>
     }
     expect(pkg.name).toBe('rsi-gear')
-    expect(pkg.version).toBe('0.1.3')
+    expect(pkg.version).toBe('0.2.0')
     expect(pkg.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(pkg.files).toContain('cordis.patch.yml')
     expect(pkg.files).toContain('assets/llm-verifier-bridge.py')
     expect(pkg.files).toContain('assets/hitch-codex-wrapper.mjs')
     expect(pkg.files).toContain('assets/hitch-codex-credential-helper.mjs')
     expect(pkg.files).toContain('assets/dsh-runtime-check.mjs')
+    expect(pkg.files).toContain('assets/python-policy-worker.cjs')
     expect(pkg.files).toContain('skills/refine/**')
     expect(pkg.bin).toEqual({
-      'gear-refine': './lib/cli.js',
+      'gear': './lib/cli.js',
+      'gear-meta-codex': './assets/codex-meta-runner.mjs',
       'gear-hitch-codex': './assets/hitch-codex-wrapper.mjs',
       'gear-dsh-runtime-check': './assets/dsh-runtime-check.mjs',
     })
     expect(pkg.exports).toHaveProperty('./skill')
+    for (const retired of ['./search', './search/api', './search/testing', './testing', './worker']) expect(pkg.exports).not.toHaveProperty(retired)
     const skillPath = resolve(root, 'skills/refine/SKILL.md')
     const skill = await readFile(skillPath, 'utf8')
     expect(skill).toContain('name: refine')
@@ -57,14 +60,12 @@ describe('published Gear bundle', () => {
       '`prompts/`',
       '`skills/`',
       '`workflows/`',
-      '`candidate.edit`',
-      '`candidate.write`',
-      '`candidate.remove`',
+      '`generate_candidate`',
       '`tools/pre-execute`',
       '`tools/post-execute`',
       '`ctx.tools.guard(...)`',
       '`@deepseek-ai/dsh-skill-filesystem`',
-      'In Native DSH Meta mode',
+      'project control plane',
     ]) {
       expect(dshGuide).toContain(required)
     }
