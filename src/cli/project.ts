@@ -10,7 +10,7 @@ import { formatRunPlan } from './run-plan.js'
 import type { RunPlan } from '../application/run-plan.js'
 
 const help = `gear setup [--hitch --target dsh|pi] [--python PATH] [--interactive] | doctor | init DIRECTORY [--target dsh|pi] [--template text|files]
-gear profile list | create NAME [--kind hitch|codex --model MODEL | --from FILE] | use NAME --role target|meta [--default]
+gear profile list | create NAME [--kind hitch|codex --model MODEL [--agent-args-json JSON] | --from FILE] | use NAME --role target|meta [--default]
 gear benchmark check | benchmark preview TASK_ID | benchmark import SOURCE [--template text|json|files|harbor] [--research]
 gear benchmark import --apply PLAN_ID
 gear benchmark probe [--task TASK_ID] [--scorer] [--image IMAGE] (builds a Docker environment; no Target/model call)
@@ -150,7 +150,16 @@ export async function projectCommand(argv: string[]): Promise<boolean> {
       })
     } else if (action === 'create') {
       const from = take('--from'),
-        kind = take('--kind')
+        kind = take('--kind'),
+        agentArgsJson = take('--agent-args-json')
+      let agentArgs: unknown
+      if (agentArgsJson !== undefined) {
+        try {
+          agentArgs = JSON.parse(agentArgsJson)
+        } catch {
+          throw new GearError('invalid-profile-options', '--agent-args-json requires a JSON string array')
+        }
+      }
       const options: Record<string, unknown> = Object.fromEntries(
         Object.entries({
           kind,
@@ -161,6 +170,7 @@ export async function projectCommand(argv: string[]): Promise<boolean> {
           harnessRef: take('--harness-ref'),
           baseImage: take('--image'),
           passEnv: take('--pass-env')?.split(',').filter(Boolean),
+          agentArgs,
           timeoutMs: take('--timeout-ms'),
           maxConcurrent: take('--max-concurrent'),
           preparationTimeoutMs: take('--preparation-timeout-ms'),

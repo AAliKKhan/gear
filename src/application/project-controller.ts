@@ -137,6 +137,7 @@ export class ProjectController {
         'harnessRef',
         'baseImage',
         'passEnv',
+        'agentArgs',
         'timeoutMs',
         'maxConcurrent',
         'preparationTimeoutMs',

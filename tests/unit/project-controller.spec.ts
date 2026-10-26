@@ -10,6 +10,8 @@ import { ProjectApplication, type ProjectBindings } from '../../src/application/
 import { ProjectController } from '../../src/application/project-controller.js'
 import { createProjectControlPlane } from '../../src/application/control-plane.js'
 import { canonicalDigest } from '../../src/domain/canonical.js'
+import { GearError } from '../../src/domain/errors.js'
+import { assertProviderEnvironmentAvailable } from '../../src/adapters/hitch/environment.js'
 import { DshHarnessAdapter } from '../../src/adapters/dsh/harness.js'
 import { TargetStore, snapshotTarget } from '../../src/adapters/storage/targets.js'
 import { requestRefineSkill } from '../../src/adapters/skill/client.js'
@@ -266,6 +268,32 @@ it('persists startup failures so a new controller can explain and recover them',
   const recovered = await next.invoke('run.resume', { run_id: runId })
   expect(recovered).toMatchObject({ status: 'completed', coverage: { physical_attempts: 1 } })
   expect(recovered).not.toHaveProperty('error')
+})
+
+it('persists safe provider probe diagnostics through startup failure, report and CLI serialization', async () => {
+  const { app, controller, provider, bindings } = await fixture(); provider.block = false
+  const { runId } = await app.admitEvaluate({ split: 'seed', limit: 1 })
+  const diagnostics = { schema_version: '1', probes: [{ probe: 'docker_info', attempt: 1, stage: 'command', outcome: 'timed_out', elapsed_ms: 10_000, exit_code: null, signal: 'SIGTERM' }] }
+  let failure: GearError | undefined
+  try {
+    assertProviderEnvironmentAvailable({ schema_version: '2', host_platform: 'linux-x64',
+      harbor: { status: 'available', version: '0.21.0', executable_digest: canonicalDigest('harbor') },
+      docker: { status: 'unavailable', version: null, executable_digest: null, engine_id: null, os: null, architecture: null, error: 'private-token' },
+      buildx: { status: 'unavailable', version: null }, sandbox: { status: 'unverified' },
+    }, diagnostics)
+  } catch (error) { failure = error as GearError }
+  expect(failure).toMatchObject({ code: 'provider-environment-unavailable' })
+  vi.spyOn(bindings, 'provider').mockRejectedValueOnce(failure)
+  await expect(controller.invoke('run.resume', { run_id: runId })).rejects.toMatchObject({ code: failure!.code, message: failure!.message, details: { run_id: runId } })
+  const next = new ProjectController(app); cleanup.push(() => next.dispose())
+  const report = await next.call('run.report', { run_id: runId })
+  const persisted = (await app.store.read(runId)).failure
+  expect(report).toMatchObject({ status: 'needs_recovery', error: { code: failure!.code, message: failure!.message } })
+  expect(persisted?.message).toBe(failure!.message)
+  expect(JSON.parse(persisted!.message.split('; diagnostics=')[1]!)).toEqual(diagnostics)
+  expect(JSON.parse(JSON.stringify(failure))).toMatchObject({ code: failure!.code, message: persisted!.message })
+  expect(JSON.stringify(report)).not.toContain('private-token')
+  expect(provider.calls).toHaveLength(0)
 })
 
 it.each(['project', 'benchmark', 'target', 'provider'])('stops submitted work after %s changes without reconnecting the execution provider', async damage => {

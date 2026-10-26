@@ -4,7 +4,11 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { canonicalDigest } from '../../domain/canonical.js'
 import { GearError } from '../../domain/errors.js'
-import { controllerObservation } from './environment.js'
+import {
+  assertProviderEnvironmentAvailable,
+  controllerObservation,
+  providerDiagnostics,
+} from './environment.js'
 import type { HitchProfile } from './provider.js'
 import type { observeEvaluationEnvironment } from './observation.js'
 
@@ -76,11 +80,29 @@ export async function openHitchSdk(profile: HitchProfile, expected: HitchEnviron
         'hitch-sdk-runtime-mismatch',
         'Preparation SDK does not match the observed Hitch controller payload',
       )
+    let diagnostics: ReturnType<typeof providerDiagnostics> | undefined
+    let invalidDiagnostics = false
     const environment = await call('backends', 'observeHarborEnvironment', {
       root: profile.root,
       env: process.env,
       signal,
+      onDiagnostic: (probe: unknown) => {
+        if (invalidDiagnostics) return
+        try {
+          diagnostics = providerDiagnostics({
+            schema_version: '1',
+            probes: [...(diagnostics?.probes ?? []), probe],
+          })
+        } catch {
+          invalidDiagnostics = true
+          diagnostics = undefined
+        }
+      },
     })
+    signal.throwIfAborted()
+    if (invalidDiagnostics)
+      throw new GearError('invalid-provider-environment', 'Hitch returned invalid provider probe diagnostics')
+    assertProviderEnvironmentAvailable(environment, diagnostics)
     if (canonicalDigest(environment) !== canonicalDigest(expected.environment))
       throw new GearError(
         'hitch-sdk-environment-mismatch',

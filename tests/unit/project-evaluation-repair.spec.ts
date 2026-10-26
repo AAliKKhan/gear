@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, expect, it, vi } from 'vitest'
 import { RunStore } from '../../src/adapters/storage/run-store.js'
 import { pythonObjective } from '../../src/adapters/python/objective.js'
@@ -14,6 +15,11 @@ import type { RunSpec } from '../../src/domain/run.js'
 import type { OperationProvider, OperationReceipt, OperationRequest } from '../../src/ports/operations.js'
 import { DurableRunner } from '../../src/runtime/runner.js'
 import { validateDecision } from '../../src/runtime/decision-validation.js'
+
+vi.mock('node:timers/promises', async (load) => {
+  const timers = await load<typeof import('node:timers/promises')>()
+  return { ...timers, setTimeout: vi.fn(timers.setTimeout) }
+})
 
 const roots: string[] = []
 afterEach(async () => {
@@ -339,6 +345,36 @@ it('cancels during persisted backoff without submitting or cancelling an unsubmi
   expect((await store.read('run')).status).toBe('cancelled')
   expect(provider.calls).toHaveLength(1)
   expect(provider.cancelled).toBe(0)
+})
+
+it('does not schedule a negative delay when a repair becomes due during the ownership check', async () => {
+  const { store, runner, provider } = await fixture({
+    evaluationRepair: { maxRetries: 2, maxProjections: 2, backoffMs: [100] },
+  })
+  const write = store.write.bind(store)
+  const priorWaits = vi.mocked(delay).mock.calls.length
+  let due: number | undefined
+  vi.spyOn(store, 'write').mockImplementation(async (journal) => {
+    await write(journal)
+    const repair = journal.operations.find((operation) => operation.request.repair)
+    if (due === undefined && repair?.status === 'reserved') {
+      due = repair.notBefore!
+      // The loop sees a future due time, then ownership I/O crosses it before scheduling.
+      vi.spyOn(Date, 'now').mockReturnValue(due + 9).mockReturnValueOnce(due - 1)
+    }
+  })
+  const warnings: Error[] = []
+  const record = (warning: Error) => warnings.push(warning)
+  process.on('warning', record)
+  try {
+    const result = await runner.run('run', signal())
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(due).toBeDefined()
+    expect(result.operations[1]!.notBefore).toBe(due)
+    expect(provider.calls).toHaveLength(2)
+    expect(vi.mocked(delay).mock.calls.slice(priorWaits)).toEqual([])
+    expect(warnings.filter((warning) => warning.name === 'TimeoutNegativeWarning')).toEqual([])
+  } finally { process.removeListener('warning', record) }
 })
 
 it('repairs held-out slots without exposing original or repaired observations to seed history', async () => {

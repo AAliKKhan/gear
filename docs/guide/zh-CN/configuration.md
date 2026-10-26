@@ -130,7 +130,11 @@ process 必须报告真实实现身份和能力，并持久实现 submit/inspect
 
 Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、`harnessRef`、`model`、`baseImage`、`passEnv`、`timeoutMs`，以及可选的 `maxConcurrent`、`setupTimeoutMs`、`preparationTimeoutMs`。新建 Target profile 默认使用 DSH `0.1.5-rc.3` 或 Pi `0.84.1`；既有 profile 保留其精确版本。当前 DSH 版本由上游固定 HMR 依赖，无需 Gear 专用覆盖。DSH 的 harnessRef 必须是确切 `deepseek@version:...` 或 commit，Pi 使用 `pi@version:...` 或 commit；baseImage 固定 OCI sha256。运行前核对解析后的 harness 源码身份、能力和 daemon 状态，并用 fresh worker observation v2 绑定 Hitch controller、Harbor 可执行文件和 Docker 引擎的观测身份。评估明确提交到 `local-docker`；新提交前和保存回执前重新观测，变化时拒绝继续接纳。回包还必须匹配 controller runtime 和执行 provider。接纳回包及补取原材料时，还核对实际请求中的模型、载体参数、凭据变量名范围、重复/并发/重试次数和超时；不一致的结果不会接纳。计划、结果及 work item 的 prepared artifact、入口/目录摘要、任务映射和平台/Node 合同也必须一致；同一评估的重复试验不能使用不同依赖。原材料补取保留原始 artifact 证据。
 
+Hitch profile 还可设置 `agentArgs`，内容为原生参数的 JSON 字符串数组。Gear 将它追加在 Target adapter 自己的参数之后，保留 DSH Target patch，再按传入顺序应用其他 overlay。创建时可附加 `--agent-args-json '["--patch","/opt/provider.json"]'`，导入 profile 时可写 `"agentArgs": ["--patch", "/opt/provider.json"]`。引用文件必须已存在于任务镜像内。参数顺序进入冻结的 provider 身份与回包核对，修改后需要新建运行。参数属于公开执行配置；密钥值应通过 `passEnv` 指定的环境变量提供，不得放入 `agentArgs` 或镜像文件。
+
 自定义运行时仓库可使用 `deepseek@git+file:///absolute/repository#<full-commit>` 或对应的 `pi@` 引用。Git 必须指定完整的小写 40 位 SHA-1 提交号；profile 校验会拒绝分支、短哈希及 64 位 SHA-256 提交号。Hitch 当前的 Git 缓存和制品构建器仅支持 SHA-1 仓库。file URL 必须规范化，空格需百分号编码。Hitch 导出并构建固定提交及其锁定依赖，因此可加载自定义 provider 插件，无需修改 Gear 或依赖可变的已安装运行时。
+
+Hitch 可附带可选的探测诊断；Gear 严格校验有界的阶段、结果、耗时、退出码和信号字段。Harbor 或 Docker 不可用时，包括 SDK 准备检查，返回 `provider-environment-unavailable`，并在持久化错误消息中保留这些安全元数据，不包含工具原始输出。诊断不进入环境身份，controller 或引擎身份变化仍被拒绝；没有诊断字段的旧观测继续兼容。
 
 运行计划连接 provider 时，Gear 通过该 Hitch 安装的公开 SDK 编译任务平台声明并准备对应的 Harbor artifact。准备前后核对 SDK 与 daemon 观测到的 controller 和 Docker/Harbor 环境；实际 artifact、入口/目录摘要与逐任务平台绑定进入 provider/evaluation identity，供跨 run baseline 比较。新物理提交前再次校验缓存文件，回执必须匹配事先冻结的绑定。首次准备可能下载包和运行 Docker 构建器，单次准备/复核由 profile 的 `preparationTimeoutMs` 控制，默认 30 分钟；不创建评估作业或模型请求。`doctor` 保持只读，不执行 artifact 构建。
 
@@ -138,7 +142,7 @@ Target 也可使用 `kind: "hitch"` profile，字段为 `executable`、`root`、
 
 新建 Hitch profile 显式保存 `maxConcurrent: 4`，与 Hitch 默认值一致；没有该字段的既有 profile 保留并发 1。创建时用 `--max-concurrent N` 请求更高的任务并发，实际接纳仍受 daemon 资源容量约束。接纳结果前会核对实际执行并发与冻结配置一致。并发属于冻结的 provider 身份，修改后须新建运行，不能复用旧身份下的评测证据。
 
-`--preparation-timeout-ms` 同时控制 artifact 准备/复核、环境绑定及提交准入（其中也会校验 Python 运行时）。`--setup-timeout-ms` 控制逐任务环境准备预算，默认 1800000 毫秒；它与任务 `timeoutMs` 之和须符合 Hitch 的 24 小时限制，完整 24 小时任务应显式设置 setup 为 0。其余时间配置使用正整数毫秒，准备期限须在 Node 定时器范围内。等待整组评测时为每个任务保留 setup 与执行预算，兼容实际 daemon 容量低于请求并发的情况。取消与响应丢失后的恢复保留原评估身份。
+`--preparation-timeout-ms` 同时控制 artifact 准备/复核、环境绑定及提交准入（其中也会校验 Python 运行时）。`--setup-timeout-ms` 设置 Harbor 的 Agent setup 覆盖值（`agent.override_setup_timeout_sec`），默认 1800000 毫秒。任务环境的构建/启动期限独立使用编译后任务的 `task.config.environment.build_timeout_sec`，未声明时使用 Harbor 默认值；增加 Agent setup 不会延长环境启动期限。Gear 保留任务声明的原生期限，未声明的默认值在冻结任务合同中仍为未知。任务 `timeoutMs` 与 Agent `setupTimeoutMs` 之和须符合 Hitch 的 24 小时限制，完整 24 小时任务应显式设置 Agent setup 为 0。其余时间配置使用正整数毫秒，准备期限须在 Node 定时器范围内。等待整组评测时为每个任务保留 setup 与执行预算，兼容实际 daemon 容量低于请求并发的情况。取消与响应丢失后的恢复保留原评估身份。
 
 Gear 同时要求 `evaluation_artifact_pins: "1"`：每次提交携带当前任务平台的产物 ID、目录摘要和入口摘要。Hitch 在产物准备后和 Harbor 执行前强制核对，恢复与重试保留原 pins；回执仍须匹配。协议和验证范围见[执行前产物约束](../../testing/hitch-artifact-pins.zh-CN.md)。
 
@@ -154,6 +158,10 @@ Gear 同时要求 `evaluation_artifact_pins: "1"`：每次提交携带当前任�
 Meta 与 Target 分别认证。Codex Meta 使用[随包 operation runner](../../codex-meta-runner.zh-CN.md)，
 原生 `kind: "codex"` 配置由 Gear 解析到当前安装包，避免手写 runner 路径。
 主机需要 HTTP 上游代理时，在 Codex profile 的 `passEnv` 中显式加入 `HTTP_PROXY`、`HTTPS_PROXY` 和可选的 `NO_PROXY`（CLI：`--pass-env HTTP_PROXY,HTTPS_PROXY,NO_PROXY`）。配置只保存变量名；可信 worker 通过这些值连接上游，Codex 只收到沙箱代理端点，不会收到上游代理凭据。`allowedDomains` 仍限制目标域名，`NO_PROXY` 也不能绕过该限制。默认不继承代理变量；使用 API key 时，须在同一列表中保留相应 key 的变量名。
+
+Codex 在清理前持久化已校验的 `receipt.json`，因此回执可能先于执行锁释放出现；私有 `cleanup-started.json` / `cleanup.json` 单独记录清理，`fallback-required` 表示有步骤失败或超时，不表示超时动作已完成。凭据、trajectory gateway、sandbox reset 和根目录分别限 500/500/1500/1000 ms，状态文件写入各限 250 ms；清理开始后的 4500 ms watchdog 兜底退出。只有本次独立 worker 可以终止经验证的自身进程组，回收 CONNECT 两端和桥接子进程；直接调用库函数不会终止宿主进程组。
+
+只有守护进程的专用确认管道证明模型组已终止后才写回执。guard 被杀或缺少确认时保持 `unknown`，不会重发；私有临时根目录保留，凭据和根目录标为 `unconfirmed`，其中可能仍有临时认证文件，需保留原 journal 调查。取消仍须在既有 5 秒等待内同时确认回执和锁释放，超时不能当作停止证明。runner asset、guard 和清理代码均绑定到实现身份，旧冻结运行不会自动改用新实现恢复。
 `doctor` 检查本地登录文件或环境变量存在性；不验证远端模型授权、不执行 benchmark。
 自定义 process 的认证返回 `provider_managed`，需按其文档检查。
 Python `Project` 提供 `profiles()`、`create_profile()`、`use_profile()`、`doctor()` 及 async 对应入口。

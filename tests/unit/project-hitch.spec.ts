@@ -381,7 +381,7 @@ it('projects independent assertions from the original trial without inferring th
   expect(decodeHitchTrials(result, evaluate, ['a'], 0).evidence[0]!.assertions?.[0]?.status).toBe('missing')
 })
 
-async function controlledProvider(initial: Record<string, unknown> = {}, options: { maxConcurrent?: number; setupTimeoutMs?: number; preparationTimeoutMs?: number } = {}) {
+async function controlledProvider(initial: Record<string, unknown> = {}, options: { maxConcurrent?: number; setupTimeoutMs?: number; preparationTimeoutMs?: number; agentArgs?: string[] } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'gear-ordered-hitch-'))
   roots.push(root)
   const executable = join(root, 'hitch.mjs'),
@@ -451,6 +451,32 @@ it('submits configured concurrency and setup budgets and allows preparation duri
   } finally {
     calls.mockRestore()
   }
+})
+
+it('preserves Target patch arguments before native overlays and freezes them across recovery', async () => {
+  const agentArgs = ['--patch', '/opt/provider.json']
+  const expected = ['--patch', '/opt/gear-target.patch.yml', ...agentArgs]
+  const f = await controlledProvider({ loseSubmitReply: true }, { agentArgs })
+  // A caller cannot mutate the already-observed profile through its original array.
+  agentArgs.push('--unexpected')
+  expect(f.provider.profile.agentArgs).toEqual(['--patch', '/opt/provider.json'])
+  await expect(f.provider.submit(request, f.signal)).rejects.toThrow('did not complete')
+  expect((await f.state()).job.request.agent_args).toEqual(expected)
+  const directory = join(f.provider.context.directory, request.operationId.slice(7))
+  const plan = JSON.parse(await readFile(join(directory, 'plan.json'), 'utf8'))
+  expect(plan.groups[0].agentArgs).toEqual(expected)
+  const targetPatch = await readFile(join(directory, 'dataset-0/a/environment/gear-target.patch.yml'), 'utf8')
+  expect(targetPatch).toContain('gear-target-resources')
+  expect(targetPatch).toContain('policy: never')
+  expect(await readFile(join(directory, 'dataset-0/a/environment/gear-target/preset/agent.cordis.yml'), 'utf8')).toContain('gear-policy')
+  const recovered = await HitchOperationProvider.connect({ ...f.provider.profile }, f.provider.context)
+  expect(recovered.identity).toBe(f.provider.identity)
+  expect(await recovered.inspect(request, f.signal)).toMatchObject({ state: 'complete' })
+  await recovered.submit(request, f.signal)
+  expect((await f.state()).jobs).toBe(1)
+  const changed = await HitchOperationProvider.connect({ ...f.provider.profile, agentArgs: ['--patch', '/opt/changed.json'] }, f.provider.context)
+  expect(changed.identity).not.toBe(f.provider.identity)
+  await expect(changed.inspect(request, f.signal)).rejects.toMatchObject({ code: 'hitch-operation-identity' })
 })
 
 it.each([undefined, 4])('submits and accepts the configured Hitch concurrency %s', async (maxConcurrent) => {
@@ -730,4 +756,60 @@ it('binds the resident model environment before admission and refuses a changed 
   expect(changed.environmentBinding.binding_id).not.toBe(f.provider.environmentBinding.binding_id)
   await expect(f.provider.submit(request, f.signal)).rejects.toMatchObject({ code: 'hitch-call-failed' })
   expect((await f.state()).submissions ?? 0).toBe(0)
+})
+
+
+it.each([false, true])('preserves a terminal Hitch failure and partial evidence (legacy identity: %s)', async (legacy) => {
+  const f = await controlledProvider({ failedResult: { trials: [] },
+    ...(legacy ? { omittedResultFields: ['dataset', 'candidate', 'prepared_artifact', 'prepared_artifacts'] } : {}) })
+  const receipt = await f.provider.submit(request, f.signal)
+  expect(receipt.result).toMatchObject({ status: 'failed', data: { errors: [{ code: 'environment_image_evidence_unavailable' }] } })
+  expect(receipt.evidence).toEqual([expect.objectContaining({ task_id: 'a', score: null, status: 'environment_failed' })])
+  expect(receipt.physicalAttempts).toBe(1)
+  expect(await f.provider.inspect(request, f.signal)).toEqual({ state: 'complete', receipt })
+  expect((await f.state()).submissions).toBe(1)
+  const source = (receipt.provenance as { evaluations: Array<Record<string, unknown>> }).evaluations[0]!
+  expect(source.trials).toEqual([])
+  if (legacy) expect(source).not.toHaveProperty('candidate')
+})
+
+it('retains certified zero scores and the upstream error on a failed Hitch evaluation', async () => {
+  const f = await controlledProvider({ failedResult: {} })
+  const receipt = await f.provider.submit(request, f.signal)
+  expect(receipt.result.status).toBe('failed')
+  expect(receipt.evidence[0]).toMatchObject({ status: 'valid', score: 0 })
+  expect(receipt.result.data).toMatchObject({ errors: [{ code: 'environment_image_evidence_unavailable' }] })
+})
+
+it.each([
+  { path: ['request', 'model'], value: 'wrong-model' },
+  { path: ['plan', 'candidate', 'model'], value: 'wrong-model' },
+  { path: ['result', 'dataset'], value: 'wrong-dataset' },
+  { path: ['result', 'candidate'], value: null },
+  { path: ['result', 'prepared_artifacts'], value: [] },
+])('still rejects changed identities in a failed Hitch evaluation: $path', async (mutation) => {
+  const f = await controlledProvider({ failedResult: {}, inspectionMutations: [mutation],
+    omittedResultFields: ['dataset', 'candidate', 'prepared_artifact', 'prepared_artifacts'] })
+  await expect(f.provider.submit(request, f.signal)).rejects.toMatchObject({
+    code: mutation.path.includes('prepared_artifacts') ? 'hitch-artifact-identity' : 'hitch-result-identity',
+  })
+})
+
+it('rejects missing result identities on a successful evaluation', async () => {
+  const f = await controlledProvider({ omittedResultFields: ['dataset', 'candidate', 'prepared_artifact', 'prepared_artifacts'] })
+  await expect(f.provider.submit(request, f.signal)).rejects.toMatchObject({ code: 'hitch-result-identity' })
+})
+
+it('decodes partial failed trials without inventing a score for missing tasks', () => {
+  const source = { schema_version: '1', status: 'failed', task_completed: true,
+    error: { code: 'environment_image_evidence_unavailable', message: 'Missing container observations' },
+    trials: [{ task_id: 'a', attempt: 1, run_id: 'run_1', observation_status: 'valid', reward: 0 }] }
+  const decoded = decodeHitchTrials(source, request, ['a', 'b'], 0)
+  expect(decoded.evidence).toEqual([
+    expect.objectContaining({ task_id: 'a', status: 'valid', score: 0 }),
+    expect.objectContaining({ task_id: 'b', status: 'environment_failed', score: null }),
+  ])
+  expect(decoded.provenance).toEqual(source)
+  expect(() => decodeHitchTrials({ ...source, trials: [...source.trials, ...source.trials] }, request, ['a', 'b'], 0)).toThrow('duplicate')
+  expect(() => decodeHitchTrials({ ...source, status: 'succeeded' }, request, ['a', 'b'], 0)).toThrow('missing')
 })

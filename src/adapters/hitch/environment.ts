@@ -32,6 +32,88 @@ const digest = (value: unknown) => typeof value === 'string' && /^sha256:[a-f0-9
 const version = (value: unknown) =>
   typeof value === 'string' && /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value)
 
+const diagnosticStages = {
+  ok: ['complete'],
+  not_found: ['resolve'],
+  io_error: ['resolve', 'fingerprint', 'identity'],
+  spawn_error: ['command'],
+  nonzero_exit: ['command'],
+  signal_exit: ['command'],
+  timed_out: ['command'],
+  output_limit: ['command'],
+  invalid_encoding: ['parse'],
+  invalid_json: ['parse'],
+  invalid_fields: ['validate'],
+  executable_changed: ['identity'],
+} as const
+interface ProviderProbeDiagnostic {
+  probe: 'harbor_version' | 'docker_info' | 'buildx_version'
+  attempt: 1 | 2
+  stage: (typeof diagnosticStages)[keyof typeof diagnosticStages][number]
+  outcome: keyof typeof diagnosticStages
+  elapsed_ms: number
+  exit_code: number | null
+  signal: 'SIGTERM' | 'SIGKILL' | 'other' | null
+}
+
+/** Rebuild bounded public metadata; never serialize a provider's raw diagnostic object. */
+export function providerDiagnostics(value: unknown): {
+  schema_version: '1'
+  probes: ProviderProbeDiagnostic[]
+} {
+  const diagnostics = object(value)
+  const message = 'unexpected provider probe diagnostics contract'
+  requireContract(
+    Object.keys(diagnostics).sort().join(',') === 'probes,schema_version' &&
+      diagnostics.schema_version === '1' &&
+      Array.isArray(diagnostics.probes) &&
+      diagnostics.probes.length >= 1 &&
+      diagnostics.probes.length <= 4,
+    'invalid-provider-environment',
+    message,
+  )
+  const seen = new Set<string>()
+  const probes = Array.from(diagnostics.probes).map((entry: unknown): ProviderProbeDiagnostic => {
+    const record = object(entry)
+    const { probe, attempt, stage, outcome, elapsed_ms, exit_code, signal } = record
+    requireContract(
+      Object.keys(record).sort().join(',') === 'attempt,elapsed_ms,exit_code,outcome,probe,signal,stage' &&
+        (probe === 'harbor_version' || probe === 'docker_info' || probe === 'buildx_version') &&
+        (attempt === 1 || (attempt === 2 && probe === 'docker_info' && seen.has('docker_info:1'))) &&
+        typeof stage === 'string' &&
+        typeof outcome === 'string' &&
+        Object.hasOwn(diagnosticStages, outcome) &&
+        (diagnosticStages[outcome as keyof typeof diagnosticStages] as readonly string[]).includes(stage) &&
+        Number.isInteger(elapsed_ms) &&
+        (elapsed_ms as number) >= 0 &&
+        (elapsed_ms as number) <= 30_000 &&
+        (exit_code === null ||
+          (Number.isInteger(exit_code) &&
+            (exit_code as number) >= -2_147_483_648 &&
+            (exit_code as number) <= 4_294_967_295)) &&
+        (signal === null || signal === 'SIGTERM' || signal === 'SIGKILL' || signal === 'other') &&
+        (outcome !== 'nonzero_exit' || (exit_code !== null && exit_code !== 0 && signal === null)) &&
+        (outcome !== 'signal_exit' || (exit_code === null && signal !== null)) &&
+        (outcome !== 'ok' || (exit_code === 0 && signal === null)),
+      'invalid-provider-environment',
+      message,
+    )
+    const key = `${probe}:${attempt}`
+    requireContract(!seen.has(key), 'invalid-provider-environment', message)
+    seen.add(key)
+    return {
+      probe,
+      attempt,
+      stage: stage as ProviderProbeDiagnostic['stage'],
+      outcome: outcome as ProviderProbeDiagnostic['outcome'],
+      elapsed_ms: elapsed_ms as number,
+      exit_code: exit_code as number | null,
+      signal,
+    }
+  })
+  return { schema_version: '1', probes }
+}
+
 /** Nonce and instance are request context. Only the stable, observed environment enters identity. */
 export function providerEnvironment(
   value: unknown,
@@ -79,22 +161,42 @@ export function providerEnvironment(
     'provider-environment-drift',
     'actual provider environment digest is missing or inconsistent',
   )
+  assertProviderEnvironmentAvailable(environment, result.diagnostics)
+  return environment
+}
+
+/** Availability and safe failure details are shared by resident observations and the local SDK. */
+export function assertProviderEnvironmentAvailable(value: unknown, rawDiagnostics?: unknown): void {
+  const environment = object(value)
+  requireContract(
+    environment.schema_version === '2' && text(environment.host_platform),
+    'invalid-provider-environment',
+    'unexpected environment observation contract',
+  )
+  const diagnostics = rawDiagnostics === undefined ? undefined : providerDiagnostics(rawDiagnostics)
   const harbor = object(environment.harbor),
     docker = object(environment.docker),
     buildx = object(environment.buildx)
-  requireContract(
-    harbor.status === 'available' &&
-      version(harbor.version) &&
-      digest(harbor.executable_digest) &&
-      docker.status === 'available' &&
-      version(docker.version) &&
-      digest(docker.executable_digest) &&
-      text(docker.engine_id) &&
-      docker.os === 'linux' &&
-      text(docker.architecture),
-    'provider-environment-unavailable',
-    'selected execution provider must observe a working Harbor executable and Linux Docker engine',
-  )
+  const checks = {
+    'harbor.status': harbor.status === 'available',
+    'harbor.version': version(harbor.version),
+    'harbor.executable_digest': digest(harbor.executable_digest),
+    'docker.status': docker.status === 'available',
+    'docker.version': version(docker.version),
+    'docker.executable_digest': digest(docker.executable_digest),
+    'docker.engine_id': text(docker.engine_id),
+    'docker.os': docker.os === 'linux',
+    'docker.architecture': text(docker.architecture),
+  }
+  const failed = Object.keys(checks).filter((key) => !checks[key as keyof typeof checks])
+  if (failed.length) {
+    // Only fixed check names and normalized states are public; raw tool errors may contain secrets.
+    const status = (value: unknown) => (value === 'available' || value === 'unavailable' ? value : 'invalid')
+    throw new GearError(
+      'provider-environment-unavailable',
+      `selected execution provider must observe a working Harbor executable and Linux Docker engine; failed checks: ${failed.join(', ')}; harbor=${status(harbor.status)}, docker=${status(docker.status)}${diagnostics ? `; diagnostics=${JSON.stringify(diagnostics)}` : ''}`,
+    )
+  }
   requireContract(
     ((buildx.status === 'available' && version(buildx.version)) ||
       (buildx.status === 'unavailable' && buildx.version === null)) &&
@@ -102,7 +204,6 @@ export function providerEnvironment(
     'invalid-provider-environment',
     'unexpected environment observation contract; version observation does not certify sandbox execution',
   )
-  return environment
 }
 
 /** Worker host/Node versions may differ; its executable Hitch payload must match the controller. */

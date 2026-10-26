@@ -48,6 +48,7 @@ export async function configuredProvider(
                   'hitch/artifacts',
                   'hitch/environment',
                   'hitch/json',
+                  'hitch/failure',
                   'hitch/observation',
                   'hitch/evidence',
                   'hitch/verifier',

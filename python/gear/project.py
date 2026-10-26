@@ -22,9 +22,60 @@ if TYPE_CHECKING:
 
 
 class ProjectError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, stderr: bytes | None = None):
         super().__init__(message)
         self.code = code
+        # Private process diagnostics may contain credentials; never add them to str(error).
+        self.stderr = stderr
+
+    @classmethod
+    def from_stderr(cls, stderr: bytes) -> ProjectError:
+        """Read the CLI's terminal error line, preserving preceding warnings as diagnostics."""
+        lines = stderr.splitlines()
+        terminal = next((line.strip() for line in reversed(lines) if line.strip()), b"")
+
+        def unique_object(pairs: list[tuple[str, JSON]]) -> dict[str, JSON]:
+            result: dict[str, JSON] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate error field")
+                result[key] = value
+            return result
+
+        try:
+            detail = json.loads(terminal, object_pairs_hook=unique_object)
+            fields = {
+                "code",
+                "message",
+                "retryable",
+                "location",
+                "next_action",
+                "run_id",
+                "operation_id",
+            }
+            if (
+                not isinstance(detail, dict)
+                or not {"code", "message"}.issubset(detail)
+                or not set(detail).issubset(fields)
+                or not isinstance(detail["code"], str)
+                or not detail["code"]
+                or not isinstance(detail["message"], str)
+                or not detail["message"]
+                or any(
+                    not isinstance(value, str)
+                    for key, value in detail.items()
+                    if key != "retryable"
+                )
+                or ("retryable" in detail and not isinstance(detail["retryable"], bool))
+            ):
+                raise ValueError("invalid terminal error envelope")
+            return cls(detail["code"], detail["message"], stderr=stderr)
+        except (ValueError, RecursionError):
+            return cls(
+                "runtime-failed",
+                "Gear runtime exited without a structured terminal error; inspect the saved stderr",
+                stderr=stderr,
+            )
 
 
 @dataclass(frozen=True)
@@ -357,14 +408,7 @@ class Project:
             await process.wait()
             raise
         if process.returncode:
-            try:
-                detail = json.loads(stderr)
-            except ValueError:
-                detail = {
-                    "code": "runtime-failed",
-                    "message": stderr.decode(errors="replace"),
-                }
-            raise ProjectError(detail["code"], detail["message"])
+            raise ProjectError.from_stderr(stderr)
         result = json.loads(stdout)
         if not isinstance(result, dict):
             raise ProjectError(

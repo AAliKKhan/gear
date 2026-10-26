@@ -51,6 +51,7 @@ export interface CreateProfileOptions {
   harnessRef?: string
   baseImage?: string
   passEnv?: string[]
+  agentArgs?: string[]
   timeoutMs?: number
   maxConcurrent?: number
   preparationTimeoutMs?: number
@@ -75,6 +76,7 @@ export async function createProfile(name: string, options: CreateProfileOptions)
           'root',
           'harnessRef',
           'baseImage',
+          'agentArgs',
           'maxConcurrent',
           'preparationTimeoutMs',
           'setupTimeoutMs',
@@ -93,6 +95,7 @@ export async function createProfile(name: string, options: CreateProfileOptions)
       model: options.model,
       baseImage: await pinImage(options.baseImage ?? runtimeMatrix.baseImage),
       passEnv: options.passEnv ?? [],
+      ...(options.agentArgs === undefined ? {} : { agentArgs: options.agentArgs }),
       timeoutMs: options.timeoutMs ?? 1_800_000,
       maxConcurrent: options.maxConcurrent ?? defaultHitchConcurrency,
       preparationTimeoutMs: options.preparationTimeoutMs ?? defaultPreparationTimeoutMs,

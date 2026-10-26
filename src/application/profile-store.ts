@@ -5,7 +5,7 @@ import { GearError } from '../domain/errors.js'
 import { canonicalDigest } from '../domain/canonical.js'
 import type { OperationProfile } from '../adapters/process/operation-provider.js'
 import type { HitchProfile } from '../adapters/hitch/provider.js'
-import { hitchSettings } from '../adapters/hitch/settings.js'
+import { hitchAgentArgs, hitchSettings } from '../adapters/hitch/settings.js'
 import { isPinnedHarnessReference } from '../adapters/hitch/reference.js'
 import { configuration, codexPassEnvNames, type CodexConfiguration } from '../adapters/codex/contracts.js'
 import { publishFile } from '../adapters/storage/atomic.js'
@@ -41,6 +41,7 @@ export function validateProfile(input: unknown): Profile {
           'model',
           'baseImage',
           'passEnv',
+          'agentArgs',
           'timeoutMs',
           'maxConcurrent',
           'preparationTimeoutMs',
@@ -72,6 +73,7 @@ export function validateProfile(input: unknown): Profile {
       throw new GearError('invalid-profile', 'timeoutMs must be between 100 and 86400000')
     if (kind === 'hitch') {
       hitchSettings(value as unknown as HitchProfile)
+      hitchAgentArgs(value)
       if (
         ['executable', 'root', 'harnessRef', 'model', 'baseImage'].some(
           (key) => typeof value[key] !== 'string' || !(value[key] as string).trim(),

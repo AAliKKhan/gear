@@ -16,6 +16,17 @@ export interface HitchSettings {
   setupTimeoutMs: number
 }
 
+/** Native argv is public and frozen; pass credential environment names through passEnv. */
+export function hitchAgentArgs(profile: { agentArgs?: unknown }): string[] {
+  if (profile.agentArgs === undefined) return []
+  if (
+    !Array.isArray(profile.agentArgs) ||
+    profile.agentArgs.some((arg) => typeof arg !== 'string' || arg.includes('\0'))
+  )
+    throw new GearError('invalid-profile', 'agentArgs must be an array of strings without NUL bytes')
+  return [...profile.agentArgs] as string[]
+}
+
 export function hitchSettings(profile: Partial<HitchSettings> & { timeoutMs: number }): HitchSettings {
   for (const key of ['maxConcurrent', 'preparationTimeoutMs', 'setupTimeoutMs'] as const) {
     if (profile[key] !== undefined && !Number.isSafeInteger(profile[key])) {

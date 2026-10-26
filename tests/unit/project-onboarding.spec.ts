@@ -36,8 +36,9 @@ it('creates default and configured preparation profiles through the public CLI',
   const binary = await executable('hitch-profile', '')
   for (const [name, flags, expected] of [
     ['defaults', [], { maxConcurrent: 4, preparationTimeoutMs: 1_800_000, setupTimeoutMs: 1_800_000 }],
-    ['configured', ['--max-concurrent', '64', '--preparation-timeout-ms', '1200000', '--setup-timeout-ms', '0'],
-      { maxConcurrent: 64, preparationTimeoutMs: 1_200_000, setupTimeoutMs: 0 }],
+    ['configured', ['--max-concurrent', '64', '--preparation-timeout-ms', '1200000', '--setup-timeout-ms', '0',
+      '--agent-args-json', '["--patch","/opt/provider.json"]'],
+      { maxConcurrent: 64, preparationTimeoutMs: 1_200_000, setupTimeoutMs: 0, agentArgs: ['--patch', '/opt/provider.json'] }],
   ] as const) {
     execFileSync(process.execPath, [resolve('lib/cli.js'), '--project', root, 'profile', 'create', name,
       '--kind', 'hitch', '--adapter', 'dsh', '--model', 'fixture-model', '--executable', binary,
@@ -120,6 +121,21 @@ it('persists explicit Hitch concurrency through profile creation', async () => {
   await controller.invoke('profile.create', { name: 'parallel', options })
   expect(await profile('parallel')).toMatchObject({ kind: 'hitch', maxConcurrent: 4 })
   await expect(controller.invoke('profile.create', { name: 'bad', options: { ...options, maxConcurrent: 0 } })).rejects.toMatchObject({ code: 'invalid-profile' })
+  await controller.dispose()
+})
+it('round-trips native arguments through Hitch profile creation and import', async () => {
+  const controller = new ProjectController(new ProjectApplication(root, { provider: async () => { throw new Error('Not called') } }))
+  const agentArgs = ['--patch', '/opt/provider with spaces.json']
+  await controller.invoke('profile.create', { name: 'native-args', options: {
+    kind: 'hitch', model: 'fixture', adapter: 'dsh', executable: process.execPath,
+    root: join(root, 'hitch'), baseImage: image, agentArgs,
+  } })
+  const saved = await profile('native-args')
+  expect(saved).toMatchObject({ agentArgs })
+  await controller.invoke('profile.import', { name: 'imported-args', profile: saved })
+  expect(await profile('imported-args')).toEqual(saved)
+  for (const invalid of [null, '--patch', [1], ['bad\0argument']])
+    expect(() => validateProfile({ ...saved, agentArgs: invalid })).toThrow('agentArgs')
   await controller.dispose()
 })
 it('reports missing credentials separately and never calls a model or exposes credential values', async () => {

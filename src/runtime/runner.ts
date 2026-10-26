@@ -394,8 +394,10 @@ export class DurableRunner {
           }
           while (operation.notBefore !== undefined && Date.now() < operation.notBefore) {
             await this.checkOwner(journal, signal)
+            const remaining = operation.notBefore - Date.now()
+            if (remaining <= 0) break
             try {
-              await delay(Math.min(30_000, operation.notBefore - Date.now()), undefined, { signal })
+              await delay(Math.min(30_000, remaining), undefined, { signal })
             } catch (error) {
               signal.throwIfAborted()
               throw error
